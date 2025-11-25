@@ -222,29 +222,26 @@ out body;
     Ok(stations)
 }
 
-/// Extract IFOPT references from OSM tram stations
+/// Extract full IFOPT references from OSM tram stations
 ///
-/// Takes the first 3 colon-separated parts from ref:IFOPT tags
-/// Example: "de:09761:401:1:1" -> "de:09761:401"
-pub fn extract_ifopt_refs(osm_stations: &[OsmTramStation]) -> HashSet<String> {
+/// Returns all unique ref:IFOPT values from OSM stations
+/// Example: "de:09761:401:1:1" is kept as-is
+pub fn extract_full_ifopt_refs(osm_stations: &[OsmTramStation]) -> Vec<String> {
     let mut ifopt_refs = HashSet::new();
 
     for station in osm_stations {
         // Check for ref:IFOPT tag
         if let Some(ifopt) = station.tags.get("ref:IFOPT") {
-            // Split by colon and take first 3 parts
-            let parts: Vec<&str> = ifopt.split(':').collect();
-            if parts.len() >= 3 {
-                let short_ref = format!("{}:{}:{}", parts[0], parts[1], parts[2]);
-                ifopt_refs.insert(short_ref);
-            }
+            ifopt_refs.insert(ifopt.clone());
         }
     }
 
+    let unique_refs: Vec<String> = ifopt_refs.into_iter().collect();
+
     info!(
-        ifopt_count = ifopt_refs.len(),
-        "Extracted unique IFOPT references"
+        ifopt_count = unique_refs.len(),
+        "Extracted unique full IFOPT references from OSM stations"
     );
 
-    ifopt_refs
+    unique_refs
 }

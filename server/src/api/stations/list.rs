@@ -1,8 +1,7 @@
-use crate::{api::AppState, models::OsmTramStation};
+use crate::api::AppState;
 use axum::{
     Json,
     extract::State,
-    http::header,
     response::{IntoResponse, Response},
 };
 
@@ -10,12 +9,12 @@ use axum::{
     get,
     path = "/api/stations",
     responses(
-        (status = 200, description = "List of all tram stations from OpenStreetMap", body = Vec<OsmTramStation>)
+        (status = 200, description = "Map of all tram stations with EFA and OSM data (keyed by station_id)")
     ),
     tag = "stations"
 )]
 pub async fn get_stations(State(state): State<AppState>) -> Response {
-    let mut response = Json(state.stations.as_ref().clone()).into_response();
+    let response = Json(state.stations.as_ref().clone()).into_response();
 
     response
 }

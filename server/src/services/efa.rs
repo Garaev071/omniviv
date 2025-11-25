@@ -113,13 +113,33 @@
 /// - Service alerts are included in the `infos` array when available
 /// - The API supports HTTPS only
 /// - Response times are typically under 1 second
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const EFA_BASE_URL: &str = "https://bahnland-bayern.de/efa/XML_DM_REQUEST";
 const EFA_STOPFINDER_URL: &str = "https://bahnland-bayern.de/efa/XML_STOPFINDER_REQUEST";
+
+/// Platform information with OSM data
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Platform {
+    pub id: String,
+    pub name: String,
+    pub coord: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub osm_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub osm_tags: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Station information with platforms
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct Station {
+    pub station_id: String,
+    pub station_name: String,
+    pub coord: Option<Vec<f64>>,
+    pub platforms: Vec<Platform>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EfaLocation {
@@ -393,33 +413,142 @@ pub async fn get_arrivals(
     Ok(data)
 }
 
-/// Get station information from EFA API as raw JSON
+/// Get station information with stop events from EFA API as raw JSON
 ///
-/// Queries the EFA STOPFINDER API for a specific station ID and returns
-/// the full JSON response for storage and analysis.
+/// Queries the EFA Departure Monitor API to get stop events which include
+/// platform information in the location details.
 ///
 /// # Arguments
-/// * `station_id` - Station ID (e.g., "de:09761:401")
+/// * `station_id` - Station ID (e.g., "de:09761:312")
 ///
 /// # Returns
-/// Full JSON response from EFA API
+/// Full JSON response from EFA API including locations and stopEvents
 pub async fn get_station_info(
     station_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!(
-        "{}?outputFormat=rapidJSON&type_sf=stop&name_sf={}&coordOutputFormat=WGS84[DD.ddddd]",
-        EFA_STOPFINDER_URL,
+        "{}?mode=direct&name_dm={}&type_dm=stop&depType=stopEvents&outputFormat=rapidJSON&includeCompleteStopSeq=1&useRealtime=1&limit=1&includedMeans=4&coordOutputFormat=EPSG:4326",
+        EFA_BASE_URL,
         urlencoding::encode(station_id)
     );
 
-    debug!(url = %url, station_id = %station_id, "Fetching station info");
+    debug!(url = %url, station_id = %station_id, "Fetching station info with stop events");
 
     let client = reqwest::Client::new();
     let response = client.get(&url).send().await?;
 
     let data: Value = response.json().await?;
 
-    info!(station_id = %station_id, "Retrieved station info");
+    info!(station_id = %station_id, "Retrieved station info with stop events");
 
     Ok(data)
+}
+
+/// Extract the parent station ID from a full IFOPT reference
+/// Example: "de:09761:692:31:a" -> "de:09761:692"
+fn extract_station_id(ifopt_ref: &str) -> String {
+    let parts: Vec<&str> = ifopt_ref.split(':').collect();
+    if parts.len() >= 3 {
+        format!("{}:{}:{}", parts[0], parts[1], parts[2])
+    } else {
+        ifopt_ref.to_string()
+    }
+}
+
+/// Extract station and platform information from EFA response
+///
+/// Transforms the raw EFA JSON response into a compact format with only
+/// essential station and platform information.
+///
+/// # Arguments
+/// * `efa_response` - Raw JSON response from EFA API
+///
+/// # Returns
+/// Station with station info and platform list
+pub fn extract_compact_station_data(efa_response: &Value) -> Option<Station> {
+    // Extract station info from locations array
+    let locations = efa_response.get("locations")?.as_array()?;
+    if locations.is_empty() {
+        warn!("No locations found in EFA response");
+        return None;
+    }
+
+    let station = &locations[0];
+    let full_id = station.get("id")?.as_str()?.to_string();
+    // Extract parent station ID (first 3 parts of IFOPT)
+    let station_id = extract_station_id(&full_id);
+    let station_name = station.get("name")?.as_str()?.to_string();
+    let station_coord = station.get("coord").and_then(|c| {
+        c.as_array().and_then(|arr| {
+            if arr.len() >= 2 {
+                Some(vec![arr[0].as_f64()?, arr[1].as_f64()?])
+            } else {
+                None
+            }
+        })
+    });
+
+    // Extract platforms from stopEvents
+    let mut platforms = Vec::new();
+    let mut seen_platform_ids = std::collections::HashSet::new();
+
+    if let Some(stop_events) = efa_response.get("stopEvents").and_then(|se| se.as_array()) {
+        for event in stop_events {
+            if let Some(location) = event.get("location") {
+                let platform_id = match location.get("id").and_then(|id| id.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+
+                // Skip if we've already seen this platform
+                if !seen_platform_ids.insert(platform_id.clone()) {
+                    continue;
+                }
+
+                // Try to get platform name from disassembledName or properties.platformName
+                let platform_name = location
+                    .get("disassembledName")
+                    .and_then(|n| n.as_str())
+                    .or_else(|| {
+                        location
+                            .get("properties")
+                            .and_then(|p| p.get("platformName"))
+                            .and_then(|n| n.as_str())
+                    })
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                let platform_coord = location.get("coord").and_then(|c| {
+                    c.as_array().and_then(|arr| {
+                        if arr.len() >= 2 {
+                            Some(vec![arr[0].as_f64()?, arr[1].as_f64()?])
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                platforms.push(Platform {
+                    id: platform_id,
+                    name: platform_name,
+                    coord: platform_coord,
+                    osm_id: None,
+                    osm_tags: None,
+                });
+            }
+        }
+    }
+
+    info!(
+        station_id = %station_id,
+        platform_count = platforms.len(),
+        "Extracted station data"
+    );
+
+    Some(Station {
+        station_id,
+        station_name,
+        coord: station_coord,
+        platforms,
+    })
 }

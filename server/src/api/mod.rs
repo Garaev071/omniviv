@@ -1,7 +1,8 @@
 pub mod lines;
 pub mod stations;
 
-use crate::models::{LineGeometry, LineGeometryRequest, OsmTramStation, TramLine};
+use crate::models::{LineGeometry, LineGeometryRequest, TramLine};
+use crate::services::efa::{Station, Platform};
 use utoipa::OpenApi;
 
 use std::collections::HashMap;
@@ -13,8 +14,8 @@ pub struct AppState {
     pub lines: Arc<Vec<TramLine>>,
     /// Cache of way geometries (way_id -> coordinates)
     pub geometry_cache: Arc<HashMap<i64, Vec<[f64; 2]>>>,
-    /// OSM tram stations
-    pub stations: Arc<Vec<OsmTramStation>>,
+    /// Stations with EFA and OSM data (station_id -> station data)
+    pub stations: Arc<HashMap<String, Station>>,
 }
 
 #[derive(OpenApi)]
@@ -26,7 +27,8 @@ pub struct AppState {
         lines::geometries::get_line_geometries
     ),
     components(schemas(
-        OsmTramStation,
+        Station,
+        Platform,
         TramLine,
         LineGeometry,
         LineGeometryRequest
