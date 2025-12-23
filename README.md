@@ -2,6 +2,11 @@
 
 A real-time tram tracking application for Augsburg, Germany.
 
+-   Get all stations for Area from OSM
+-   Get all platforms for Area from OSM
+-   Get all stop positions for Area from OSM
+-   Get all routes for Area from OSM
+
 ## Project Structure
 
 ```
@@ -22,11 +27,13 @@ live-tram/
 ### 1. Server (Rust)
 
 Downloads and processes Augsburg tram data from OpenStreetMap:
-- 32 tram line variants (lines 1, 2, 3, 4, 6, 8, 9)
-- 201 tram stations with GPS coordinates
-- Route information including stops and geometry
+
+-   32 tram line variants (lines 1, 2, 3, 4, 6, 8, 9)
+-   201 tram stations with GPS coordinates
+-   Route information including stops and geometry
 
 **Run:**
+
 ```bash
 cd server
 cargo run
@@ -35,64 +42,71 @@ cargo run
 ### 2. MapTiler Server (Docker)
 
 Serves Bavaria region map tiles for the frontend:
-- Vector tiles in MBTiles format
-- Covers entire Bavaria region including Augsburg
-- Runs on port 8080
+
+-   Vector tiles in MBTiles format
+-   Covers entire Bavaria region including Augsburg
+-   Runs on port 8080
 
 **Run:**
+
 ```bash
 cd maptiler
 docker compose up -d
 ```
 
 **Access:**
-- UI: http://localhost:8080
-- Health: http://localhost:8080/health
+
+-   UI: http://localhost:8080
+-   Health: http://localhost:8080/health
 
 See [maptiler/README.md](maptiler/README.md) for detailed usage.
 
 ### 3. Web Frontend (Coming Soon)
 
 Will display:
-- Interactive map with Augsburg tram network
-- Real-time tram positions
-- Station information
-- Route planning
+
+-   Interactive map with Augsburg tram network
+-   Real-time tram positions
+-   Station information
+-   Route planning
 
 ## Quick Start
 
 1. **Download tram data:**
-   ```bash
-   cd server
-   cargo run
-   ```
+
+    ```bash
+    cd server
+    cargo run
+    ```
 
 2. **Start map tile server:**
-   ```bash
-   cd maptiler
-   docker compose up -d
-   ```
+
+    ```bash
+    cd maptiler
+    docker compose up -d
+    ```
 
 3. **Verify tile server is running:**
-   ```bash
-   curl http://localhost:8080/health
-   ```
+    ```bash
+    curl http://localhost:8080/health
+    ```
 
 ## Data Sources
 
-- **Tram Network**: OpenStreetMap via Overpass API
-- **Map Tiles**: MapTiler OpenMapTiles (Bavaria extract)
+-   **Tram Network**: OpenStreetMap via Overpass API
+-   **Map Tiles**: MapTiler OpenMapTiles (Bavaria extract)
 
 ## Technology Stack
 
-- **Backend**: Rust
-- **Map Tiles**: TileServer GL (Docker)
-- **Data**: OpenStreetMap, MBTiles
-- **Frontend**: TBD (MapLibre GL recommended)
+-   **Backend**: Rust
+-   **Map Tiles**: TileServer GL (Docker)
+-   **Data**: OpenStreetMap, MBTiles
+-   **Frontend**: TBD (MapLibre GL recommended)
 
 ## Development
 
 The project is currently in the data gathering phase. Next steps:
+
 1. Create web frontend with MapLibre GL
 2. Display tram lines and stations on the map
 3. Add real-time tram position tracking

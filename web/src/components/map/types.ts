@@ -28,15 +28,14 @@ export interface VehiclePosition {
     line_number: string;
     line_name: string;
     destination: string;
-    coordinates: [number, number];
-    progress: number;
-    from_station_id: string;
-    to_station_id: string;
+    progress: number; // 0.0 to 1.0 along the geometry_segment
+    from_station_id: string; // IFOPT ID
+    to_station_id: string; // IFOPT ID
+    geometry_segment: [number, number][]; // Track geometry between stations [lon, lat]
     departure_time: string;
     arrival_time: string;
     delay?: number;
     calculated_at: string;
-    geometry_segment?: [number, number][];
 }
 
 export interface VehiclePositionsResponse {

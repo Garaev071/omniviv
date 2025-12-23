@@ -244,6 +244,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let efa_metrics = Arc::new(services::metrics::MetricsTracker::new());
 
+    // Build line geometries map for position tracker
+    // Extract geometry segments for each line using way_ids
+    let mut line_geometries: HashMap<String, Vec<Vec<[f64; 2]>>> = HashMap::new();
+    for line in &lines {
+        if let Some(ref_number) = &line.ref_number {
+            // Skip if we already processed this line number
+            if line_geometries.contains_key(ref_number) {
+                continue;
+            }
+
+            // Collect all lines with this ref number
+            let lines_for_ref: Vec<_> = lines
+                .iter()
+                .filter(|l| l.ref_number.as_deref() == Some(ref_number.as_str()))
+                .collect();
+
+            // Collect all way IDs for this line
+            let all_way_ids: std::collections::HashSet<i64> = lines_for_ref
+                .iter()
+                .flat_map(|l| l.way_ids.iter().copied())
+                .collect();
+
+            // Get geometry segments for these ways
+            let segments: Vec<Vec<[f64; 2]>> = all_way_ids
+                .iter()
+                .filter_map(|id| geometry_cache.get(id).cloned())
+                .collect();
+
+            if !segments.is_empty() {
+                let segment_count = segments.len();
+                line_geometries.insert(ref_number.clone(), segments);
+                info!(
+                    line = %ref_number,
+                    segments = segment_count,
+                    "Loaded geometry for line"
+                );
+            }
+        }
+    }
+
+    let position_tracker = Arc::new(std::sync::RwLock::new(
+        services::vehicle_positions::VehiclePositionTracker::new(line_geometries)
+    ));
+
     let state = AppState {
         lines: Arc::new(lines),
         lines_with_ifopt: Arc::new(lines_with_ifopt),
@@ -251,14 +295,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stations: Arc::new(stations),
         stop_events: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         vehicles: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        vehicle_positions: position_tracker.clone(),
         efa_metrics: efa_metrics.clone(),
         invalid_stations: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
     };
 
     // Spawn background task to update stop events cache every 5 seconds
     let cache_stations = state.stations.clone();
+    let stations_for_positions = state.stations.clone();
     let cache = state.stop_events.clone();
     let vehicle_list_cache = state.vehicles.clone();
+    let position_tracker_for_task = position_tracker.clone();
     let metrics_for_cache = efa_metrics.clone();
     let invalid_stations_for_cache = state.invalid_stations.clone();
 
@@ -394,12 +441,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Write both caches atomically
             {
                 let mut cache_write = cache.write().unwrap();
-                *cache_write = new_stop_events;
+                *cache_write = new_stop_events.clone();
             }
 
             {
                 let mut vehicle_list_cache_write = vehicle_list_cache.write().unwrap();
-                *vehicle_list_cache_write = vehicle_list.vehicles;
+                *vehicle_list_cache_write = vehicle_list.vehicles.clone();
+            }
+
+            // Update vehicle positions using the stateful tracker
+            {
+                let mut tracker = position_tracker_for_task.write().unwrap();
+                tracker.update(&vehicle_list.vehicles, &new_stop_events, &stations_for_positions);
             }
         }
     });

@@ -3,6 +3,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import React from "react";
 import { PopupManager } from "./popupManager";
 import { VehiclePosition, VehiclePositionsResponse, Station } from "./types";
+import { interpolateAlongLine, findGeometryBetweenStations } from "./geometryUtils";
 
 interface MapProps {
     className?: string;
@@ -13,6 +14,9 @@ export default class TramMap extends React.Component<MapProps> {
     private map: maplibregl.Map | null = null;
     private vehicleInterval?: number;
     private popupManager?: PopupManager;
+    private lineGeometries: Map<string, [number, number][][]> = new Map();
+    private stations: { [stationId: string]: Station } = {};
+    private animationFrame?: number;
 
     constructor(props: MapProps) {
         super(props);
@@ -26,9 +30,12 @@ export default class TramMap extends React.Component<MapProps> {
     }
 
     componentWillUnmount() {
-        // Cleanup intervals
+        // Cleanup intervals and animation frames
         if (this.vehicleInterval) {
             clearInterval(this.vehicleInterval);
+        }
+        if (this.animationFrame) {
+            cancelAnimationFrame(this.animationFrame);
         }
         if (this.map) {
             this.map.remove();
@@ -119,6 +126,11 @@ export default class TramMap extends React.Component<MapProps> {
             const lineGeometries = await lineGeometriesResponse.json();
             console.log(`Received ${lineGeometries.length} line geometries from API`);
 
+            // Store geometries for vehicle interpolation
+            lineGeometries.forEach((lineData: any) => {
+                this.lineGeometries.set(lineData.line_ref, lineData.segments);
+            });
+
             // Add each tram line as a separate layer with its own color
             lineGeometries.forEach((lineData: any) => {
                 if (lineData.segments.length > 0) {
@@ -179,6 +191,9 @@ export default class TramMap extends React.Component<MapProps> {
             const stationsMap = await stationsResponse.json();
             const stationCount = Object.keys(stationsMap).length;
             console.log(`Received ${stationCount} tram stations with platforms from API`);
+
+            // Store stations for vehicle position interpolation
+            this.stations = stationsMap;
 
             // Initialize popup manager
             this.popupManager = new PopupManager(this.map, stationsMap);
@@ -460,22 +475,37 @@ export default class TramMap extends React.Component<MapProps> {
 
                 console.log(`Received positions for ${Object.keys(data.vehicles).length} vehicles`);
 
-                // Convert to GeoJSON features
-                const vehicleFeatures = Object.values(data.vehicles).map((vehicle) => ({
-                    type: "Feature" as const,
-                    geometry: {
-                        type: "Point" as const,
-                        coordinates: vehicle.coordinates
-                    },
-                    properties: {
-                        vehicle_id: vehicle.vehicle_id,
-                        line_number: vehicle.line_number,
-                        line_name: vehicle.line_name,
-                        destination: vehicle.destination,
-                        progress: vehicle.progress,
-                        delay: vehicle.delay || 0
-                    }
-                }));
+                // Convert to GeoJSON features with geometry interpolation
+                const vehicleFeatures = Object.values(data.vehicles)
+                    .map((vehicle) => {
+                        // Use geometry_segment from backend
+                        const geometry = vehicle.geometry_segment;
+
+                        if (!geometry || geometry.length === 0) {
+                            console.warn(`No geometry provided for vehicle ${vehicle.vehicle_id}`);
+                            return null;
+                        }
+
+                        // Interpolate position along geometry
+                        const coordinates = interpolateAlongLine(geometry, vehicle.progress);
+
+                        return {
+                            type: "Feature" as const,
+                            geometry: {
+                                type: "Point" as const,
+                                coordinates
+                            },
+                            properties: {
+                                vehicle_id: vehicle.vehicle_id,
+                                line_number: vehicle.line_number,
+                                line_name: vehicle.line_name,
+                                destination: vehicle.destination,
+                                progress: vehicle.progress,
+                                delay: vehicle.delay || 0
+                            }
+                        };
+                    })
+                    .filter((f): f is NonNullable<typeof f> => f !== null);
 
                 // Update vehicle source
                 const source = this.map?.getSource("vehicles") as maplibregl.GeoJSONSource;

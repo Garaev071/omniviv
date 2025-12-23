@@ -12,14 +12,16 @@ pub struct VehiclePosition {
     pub line_name: String,
     /// Final destination name
     pub destination: String,
-    /// Estimated coordinates [longitude, latitude]
-    pub coordinates: [f64; 2],
     /// Progress between from_station and to_station (0.0 to 1.0)
+    /// Frontend should interpolate along the geometry_segment
     pub progress: f64,
-    /// Station the vehicle departed from
+    /// IFOPT ID of the station/platform the vehicle departed from
     pub from_station_id: String,
-    /// Station the vehicle is heading to
+    /// IFOPT ID of the station/platform the vehicle is heading to
     pub to_station_id: String,
+    /// Geometry segment between from_station and to_station
+    /// Array of [longitude, latitude] coordinates representing the actual track
+    pub geometry_segment: Vec<[f64; 2]>,
     /// Planned departure time from from_station (ISO 8601)
     pub departure_time: String,
     /// Planned arrival time at to_station (ISO 8601)
@@ -28,10 +30,6 @@ pub struct VehiclePosition {
     pub delay: Option<i32>,
     /// Timestamp when this position was calculated (ISO 8601)
     pub calculated_at: String,
-    /// Geometry segment between from_station and to_station for client-side interpolation
-    /// Array of [longitude, latitude] coordinates
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub geometry_segment: Option<Vec<[f64; 2]>>,
 }
 
 /// Basic vehicle information extracted from stop events

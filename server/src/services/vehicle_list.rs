@@ -111,17 +111,29 @@ pub fn extract_unique_vehicles(
 
             // Check if we already have this vehicle in current batch
             if let Some(existing) = vehicles.get(&vehicle_id) {
-                // Compare departure times - keep the one with LATER departure
+                // For position tracking, keep the stop with departure closest to NOW
+                // Prefer past departures over future ones
                 let existing_departure = chrono::DateTime::parse_from_rfc3339(&existing.last_departure_planned)
                     .ok()
                     .map(|dt| dt.with_timezone(&chrono::Utc));
 
                 if let Some(existing_dt) = existing_departure {
-                    if departure_time > existing_dt {
-                        // Current stop event is later, replace existing
+                    let existing_diff = (existing_dt - now).num_seconds().abs();
+                    let current_diff = (departure_time - now).num_seconds().abs();
+
+                    let existing_is_past = existing_dt <= now;
+                    let current_is_past = departure_time <= now;
+
+                    // Prefer past departures, then choose closest to NOW
+                    let should_replace = match (existing_is_past, current_is_past) {
+                        (false, true) => true,  // Current is past, existing is future -> use current
+                        (true, false) => false, // Existing is past, current is future -> keep existing
+                        _ => current_diff < existing_diff, // Both past or both future -> use closest to NOW
+                    };
+
+                    if should_replace {
                         replaced_with_later += 1;
                     } else {
-                        // Existing is later or same, keep it
                         continue;
                     }
                 }

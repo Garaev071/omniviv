@@ -12,6 +12,7 @@ use crate::services::efa::{
     EfaStopEvent, EfaTransportation, Platform, Station,
 };
 use crate::services::metrics::MetricsTracker;
+use crate::services::vehicle_positions::VehiclePositionTracker;
 use utoipa::OpenApi;
 
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,8 @@ pub struct AppState {
     pub stop_events: Arc<RwLock<HashMap<String, EfaDepartureMonitorResponse>>>,
     /// Tracked vehicles (vehicle_id -> vehicle info)
     pub vehicles: Arc<RwLock<HashMap<String, VehicleInfo>>>,
+    /// Vehicle position tracker with stateful tracking
+    pub vehicle_positions: Arc<RwLock<VehiclePositionTracker>>,
     /// Metrics tracker for EFA API requests
     pub efa_metrics: Arc<MetricsTracker>,
     /// Set of station IDs that consistently fail EFA queries (should not be queried)
