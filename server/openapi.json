@@ -218,6 +218,27 @@
         }
       }
     },
+    "/api/issues": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List all OSM data quality issues",
+        "operationId": "list_issues",
+        "responses": {
+          "200": {
+            "description": "List of OSM data quality issues",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/routes": {
       "get": {
         "tags": [
@@ -673,6 +694,129 @@
           "arrival"
         ]
       },
+      "IssueListResponse": {
+        "type": "object",
+        "required": [
+          "issues",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OsmIssue"
+            }
+          }
+        }
+      },
+      "OsmIssue": {
+        "type": "object",
+        "description": "An OSM data quality issue detected during sync",
+        "required": [
+          "osm_id",
+          "osm_type",
+          "element_type",
+          "issue_type",
+          "transport_type",
+          "description",
+          "osm_url",
+          "detected_at"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "detected_at": {
+            "type": "string"
+          },
+          "element_type": {
+            "type": "string"
+          },
+          "issue_type": {
+            "$ref": "#/components/schemas/OsmIssueType"
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "lon": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "osm_url": {
+            "type": "string"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ref tag value (e.g., platform letter \"a\", \"b\")"
+          },
+          "suggested_ifopt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Suggested IFOPT from EFA API (for missing_ifopt issues)"
+          },
+          "suggested_ifopt_distance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Distance in meters to the suggested EFA stop",
+            "minimum": 0
+          },
+          "suggested_ifopt_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the EFA stop that was matched"
+          },
+          "transport_type": {
+            "$ref": "#/components/schemas/TransportType"
+          }
+        }
+      },
+      "OsmIssueType": {
+        "type": "string",
+        "description": "Types of OSM data quality issues",
+        "enum": [
+          "missing_ifopt",
+          "missing_coordinates",
+          "orphaned_element",
+          "missing_route_ref",
+          "missing_name",
+          "missing_stop_position",
+          "missing_platform"
+        ]
+      },
       "Route": {
         "type": "object",
         "required": [
@@ -1027,6 +1171,16 @@
           }
         }
       },
+      "TransportType": {
+        "type": "string",
+        "description": "Transport type for filtering issues",
+        "enum": [
+          "tram",
+          "bus",
+          "train",
+          "unknown"
+        ]
+      },
       "Vehicle": {
         "type": "object",
         "required": [
@@ -1197,6 +1351,10 @@
     {
       "name": "vehicles",
       "description": "Live vehicle tracking"
+    },
+    {
+      "name": "issues",
+      "description": "OSM data quality issues"
     }
   ]
 }

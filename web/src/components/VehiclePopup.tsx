@@ -23,6 +23,8 @@ export function VehiclePopup({
 
     const getStatusText = () => {
         switch (status) {
+            case "waiting":
+                return currentStopName ? `Waiting at ${currentStopName}` : "Waiting to depart";
             case "at_stop":
                 return currentStopName ? `At ${currentStopName}` : "At stop";
             case "in_transit":

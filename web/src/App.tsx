@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Api, Area, Route, RouteGeometry, Station, Vehicle } from "./api";
+import { IssuesPanel } from "./components/IssuesPanel";
 import Map from "./components/Map";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = new Api({ baseUrl: API_URL });
 
 // How often to refresh vehicle positions (in milliseconds)
-const VEHICLE_REFRESH_INTERVAL = 15000;
+const VEHICLE_REFRESH_INTERVAL = 5000;
 
 export interface RouteWithGeometry extends Route {
     geometry: RouteGeometry | null;
@@ -117,6 +118,9 @@ export default function App() {
                 showRoutes={showRoutes}
                 showVehicles={showVehicles}
             />
+
+            {/* Issues Panel */}
+            <IssuesPanel />
 
             {/* Burger Menu Button */}
             <button

@@ -34,6 +34,7 @@ use sync::SyncManager;
         api::departures::list_departures,
         api::departures::get_departures_by_stop,
         api::vehicles::get_vehicles_by_route,
+        api::issues::list_issues,
     ),
     components(schemas(
         api::areas::list::Area,
@@ -56,15 +57,19 @@ use sync::SyncManager;
         api::vehicles::VehiclesByRouteResponse,
         api::vehicles::Vehicle,
         api::vehicles::VehicleStop,
+        api::issues::IssueListResponse,
         sync::Departure,
         sync::EventType,
+        sync::OsmIssue,
+        sync::OsmIssueType,
     )),
     tags(
         (name = "areas", description = "Area management endpoints"),
         (name = "routes", description = "Route endpoints"),
         (name = "stations", description = "Station and platform endpoints"),
         (name = "departures", description = "Real-time departure information"),
-        (name = "vehicles", description = "Live vehicle tracking")
+        (name = "vehicles", description = "Live vehicle tracking"),
+        (name = "issues", description = "OSM data quality issues")
     )
 )]
 struct ApiDoc;
@@ -126,6 +131,7 @@ async fn main() {
         SyncManager::new(pool.clone(), config).expect("Failed to initialize sync manager"),
     );
     let departure_store = sync_manager.departure_store();
+    let issue_store = sync_manager.issue_store();
     let sync_manager_clone = sync_manager.clone();
     tokio::spawn(async move {
         sync_manager_clone.start().await;
@@ -135,7 +141,7 @@ async fn main() {
     #[allow(unused_mut)] // mut needed when dev-tools feature is enabled
     let mut app = Router::new()
         .route("/", get(root))
-        .nest("/api", api::router(pool.clone(), departure_store))
+        .nest("/api", api::router(pool.clone(), departure_store, issue_store))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);

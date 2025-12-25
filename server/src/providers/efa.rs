@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 
 const EFA_BASE_URL: &str = "https://bahnland-bayern.de/efa/XML_DM_REQUEST";
+const EFA_COORD_URL: &str = "https://bahnland-bayern.de/efa/XML_COORD_REQUEST";
 /// Maximum concurrent requests to EFA API to avoid overwhelming the service
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
@@ -174,6 +175,86 @@ impl EfaClient {
         self.get_stop_events_batch(stop_ifopts, limit_per_stop, tram_only, StopEventType::Arrival)
             .await
     }
+
+    /// Search for stops near given coordinates
+    /// Returns stops within the specified radius (in meters)
+    pub async fn find_stops_by_coord(
+        &self,
+        lon: f64,
+        lat: f64,
+        radius_meters: u32,
+    ) -> Result<CoordSearchResponse, EfaError> {
+        let url = format!(
+            "{}?outputFormat=rapidJSON&coord={}:{}:WGS84&inclFilter=1&type_1=STOP&radius_1={}",
+            EFA_COORD_URL, lon, lat, radius_meters
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| EfaError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(EfaError::ApiError(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| EfaError::NetworkError(e.to_string()))?;
+
+        serde_json::from_str(&body).map_err(|e| {
+            tracing::warn!(
+                "Failed to parse EFA coord response: {} - body: {}",
+                e,
+                &body[..body.len().min(500)]
+            );
+            EfaError::ParseError(e.to_string())
+        })
+    }
+
+    /// Get all platforms for a station by querying departures
+    /// Returns a list of unique platforms with their full IFOPTs
+    pub async fn get_station_platforms(
+        &self,
+        station_ifopt: &str,
+    ) -> Result<Vec<PlatformInfo>, EfaError> {
+        // Query departures for this station to get platform information
+        let response = self.get_stop_events(station_ifopt, 20, false, StopEventType::Departure).await?;
+
+        let mut platforms: std::collections::HashMap<String, PlatformInfo> = std::collections::HashMap::new();
+
+        for event in &response.stop_events {
+            if let Some(location) = &event.location {
+                if let Some(id) = &location.id {
+                    // Only include platform-level IFOPTs (more than 3 parts)
+                    if id.split(':').count() > 3 && !platforms.contains_key(id) {
+                        let platform = location.properties.as_ref()
+                            .and_then(|p| p.platform.clone());
+                        let name = location.disassembled_name.clone()
+                            .or_else(|| location.properties.as_ref()?.platform_name.clone());
+                        let station_name = location.parent.as_ref()
+                            .and_then(|p| p.name.clone())
+                            .or_else(|| location.name.clone());
+
+                        platforms.insert(id.clone(), PlatformInfo {
+                            ifopt: id.clone(),
+                            platform,
+                            name,
+                            station_name,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(platforms.into_values().collect())
+    }
 }
 
 // Response structures
@@ -197,6 +278,15 @@ pub struct Location {
     pub location_type: Option<String>,
     pub coord: Option<Vec<f64>>,
     pub properties: Option<LocationProperties>,
+    pub parent: Option<LocationParent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationParent {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub parent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,4 +473,79 @@ pub struct InfoLink {
     pub url: Option<String>,
     pub content: Option<String>,
     pub subtitle: Option<String>,
+}
+
+// Coordinate search response structures
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordSearchResponse {
+    pub version: Option<String>,
+    #[serde(default)]
+    pub locations: Vec<CoordLocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordLocation {
+    /// IFOPT ID (e.g., "de:09761:105")
+    pub id: Option<String>,
+    /// Stop name (e.g., "Staatstheater")
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub location_type: Option<String>,
+    /// Coordinates in EFA format
+    pub coord: Option<Vec<f64>>,
+    pub parent: Option<CoordLocationParent>,
+    pub properties: Option<CoordLocationProperties>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordLocationParent {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub parent_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordLocationProperties {
+    /// Distance in meters from the queried coordinates
+    pub distance: Option<u32>,
+    #[serde(rename = "STOP_GLOBAL_ID")]
+    pub stop_global_id: Option<String>,
+    #[serde(rename = "STOP_NAME_WITH_PLACE")]
+    pub stop_name_with_place: Option<String>,
+}
+
+impl CoordLocation {
+    /// Get the IFOPT ID
+    pub fn ifopt(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// Get the distance in meters from the queried coordinates
+    pub fn distance_meters(&self) -> Option<u32> {
+        self.properties.as_ref()?.distance
+    }
+
+    /// Get the full name with place (e.g., "Augsburg, Staatstheater")
+    pub fn full_name(&self) -> Option<&str> {
+        self.properties
+            .as_ref()?
+            .stop_name_with_place
+            .as_deref()
+            .or(self.name.as_deref())
+    }
+}
+
+/// Platform information extracted from departure data
+#[derive(Debug, Clone)]
+pub struct PlatformInfo {
+    /// Full platform IFOPT (e.g., "de:09761:691:0:a")
+    pub ifopt: String,
+    /// Platform letter/number (e.g., "a", "1")
+    pub platform: Option<String>,
+    /// Platform name (e.g., "Bstg. a")
+    pub name: Option<String>,
+    /// Parent station name
+    pub station_name: Option<String>,
 }

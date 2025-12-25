@@ -50,6 +50,168 @@ impl Departure {
 /// In-memory store for departure data
 pub type DepartureStore = Arc<RwLock<HashMap<String, Vec<Departure>>>>;
 
+/// Types of OSM data quality issues
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OsmIssueType {
+    MissingIfopt,
+    MissingCoordinates,
+    OrphanedElement,
+    MissingRouteRef,
+    MissingName,
+    MissingStopPosition,
+    MissingPlatform,
+}
+
+/// Transport type for filtering issues
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportType {
+    Tram,
+    Bus,
+    Train,
+    Unknown,
+}
+
+impl OsmIssueType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OsmIssueType::MissingIfopt => "missing_ifopt",
+            OsmIssueType::MissingCoordinates => "missing_coordinates",
+            OsmIssueType::OrphanedElement => "orphaned_element",
+            OsmIssueType::MissingRouteRef => "missing_route_ref",
+            OsmIssueType::MissingName => "missing_name",
+            OsmIssueType::MissingStopPosition => "missing_stop_position",
+            OsmIssueType::MissingPlatform => "missing_platform",
+        }
+    }
+}
+
+/// An OSM data quality issue detected during sync
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct OsmIssue {
+    pub osm_id: i64,
+    pub osm_type: String,
+    pub element_type: String,
+    pub issue_type: OsmIssueType,
+    pub transport_type: TransportType,
+    pub description: String,
+    pub osm_url: String,
+    pub name: Option<String>,
+    /// The ref tag value (e.g., platform letter "a", "b")
+    #[serde(rename = "ref")]
+    pub ref_tag: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub detected_at: String,
+    /// Suggested IFOPT from EFA API (for missing_ifopt issues)
+    pub suggested_ifopt: Option<String>,
+    /// Name of the EFA stop that was matched
+    pub suggested_ifopt_name: Option<String>,
+    /// Distance in meters to the suggested EFA stop
+    pub suggested_ifopt_distance: Option<u32>,
+}
+
+impl OsmIssue {
+    pub fn new(
+        osm_id: i64,
+        osm_type: &str,
+        element_type: &str,
+        issue_type: OsmIssueType,
+        transport_type: TransportType,
+        description: String,
+        name: Option<String>,
+        ref_tag: Option<String>,
+        lat: Option<f64>,
+        lon: Option<f64>,
+    ) -> Self {
+        let osm_url = format!(
+            "https://www.openstreetmap.org/edit?{}={}",
+            osm_type, osm_id
+        );
+        Self {
+            osm_id,
+            osm_type: osm_type.to_string(),
+            element_type: element_type.to_string(),
+            issue_type,
+            transport_type,
+            description,
+            osm_url,
+            name,
+            ref_tag,
+            lat,
+            lon,
+            detected_at: Utc::now().to_rfc3339(),
+            suggested_ifopt: None,
+            suggested_ifopt_name: None,
+            suggested_ifopt_distance: None,
+        }
+    }
+
+    /// Set the suggested IFOPT from EFA lookup
+    pub fn with_suggested_ifopt(
+        mut self,
+        ifopt: String,
+        name: Option<String>,
+        distance: Option<u32>,
+    ) -> Self {
+        self.suggested_ifopt = Some(ifopt);
+        self.suggested_ifopt_name = name;
+        self.suggested_ifopt_distance = distance;
+        self
+    }
+}
+
+/// Determine transport type from OSM element tags
+fn determine_transport_type(element: &crate::providers::osm::OsmElement) -> TransportType {
+    // Check railway tag
+    if let Some(railway) = element.tag("railway") {
+        match railway.as_str() {
+            "tram_stop" | "tram" => return TransportType::Tram,
+            "station" | "halt" | "stop" => return TransportType::Train,
+            _ => {}
+        }
+    }
+
+    // Check highway tag for bus stops
+    if let Some(highway) = element.tag("highway") {
+        if highway == "bus_stop" {
+            return TransportType::Bus;
+        }
+    }
+
+    // Check public_transport tag
+    if let Some(pt) = element.tag("public_transport") {
+        if pt == "stop_position" || pt == "platform" {
+            // Try to determine from tram/bus/train tags
+            if element.tag("tram").is_some() || element.tag("light_rail").is_some() {
+                return TransportType::Tram;
+            }
+            if element.tag("bus").is_some() {
+                return TransportType::Bus;
+            }
+            if element.tag("train").is_some() {
+                return TransportType::Train;
+            }
+        }
+    }
+
+    TransportType::Unknown
+}
+
+/// Determine transport type from route type string
+fn transport_type_from_route(route_type: &str) -> TransportType {
+    match route_type {
+        "tram" | "light_rail" => TransportType::Tram,
+        "bus" | "trolleybus" => TransportType::Bus,
+        "train" | "railway" | "subway" | "monorail" => TransportType::Train,
+        _ => TransportType::Unknown,
+    }
+}
+
+/// In-memory store for OSM data quality issues
+pub type OsmIssueStore = Arc<RwLock<Vec<OsmIssue>>>;
+
 /// Manages background synchronization of OSM and EFA data
 pub struct SyncManager {
     pool: SqlitePool,
@@ -57,6 +219,7 @@ pub struct SyncManager {
     efa_client: EfaClient,
     config: Arc<RwLock<Config>>,
     departures: DepartureStore,
+    issues: OsmIssueStore,
 }
 
 impl SyncManager {
@@ -70,12 +233,18 @@ impl SyncManager {
             efa_client,
             config: Arc::new(RwLock::new(config)),
             departures: Arc::new(RwLock::new(HashMap::new())),
+            issues: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
     /// Get a reference to the departure store for API access
     pub fn departure_store(&self) -> DepartureStore {
         self.departures.clone()
+    }
+
+    /// Get a reference to the OSM issue store for API access
+    pub fn issue_store(&self) -> OsmIssueStore {
+        self.issues.clone()
     }
 
     /// Start the background sync loops
@@ -119,6 +288,12 @@ impl SyncManager {
 
     /// Sync all areas from config
     async fn sync_all_areas(&self) {
+        // Clear previous issues before starting new sync
+        {
+            let mut issues = self.issues.write().await;
+            issues.clear();
+        }
+
         let config = self.config.read().await;
         let areas = config.areas.clone();
         drop(config);
@@ -143,6 +318,220 @@ impl SyncManager {
                 }
             }
         }
+
+        // After all areas are synced, enrich missing IFOPT issues with EFA suggestions
+        self.enrich_issues_with_efa_suggestions().await;
+    }
+
+    /// Enrich missing IFOPT issues with suggested IFOPTs from EFA API
+    async fn enrich_issues_with_efa_suggestions(&self) {
+        let mut issues = self.issues.write().await;
+
+        // Find all missing IFOPT issues with coordinates
+        let missing_ifopt_indices: Vec<usize> = issues
+            .iter()
+            .enumerate()
+            .filter(|(_, issue)| {
+                matches!(issue.issue_type, OsmIssueType::MissingIfopt)
+                    && issue.lat.is_some()
+                    && issue.lon.is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if missing_ifopt_indices.is_empty() {
+            return;
+        }
+
+        info!(
+            count = missing_ifopt_indices.len(),
+            "Enriching missing IFOPT issues with EFA suggestions"
+        );
+
+        // Process each issue and query EFA
+        for idx in missing_ifopt_indices {
+            let issue = &issues[idx];
+            let lat = issue.lat.unwrap();
+            let lon = issue.lon.unwrap();
+            let osm_name = issue.name.clone();
+            let element_type = issue.element_type.clone();
+
+            // Query EFA for nearby stops (200m radius)
+            match self.efa_client.find_stops_by_coord(lon, lat, 200).await {
+                Ok(response) => {
+                    // For platforms and stop_positions, try to get platform-level IFOPT
+                    if element_type == "platform" || element_type == "stop_position" {
+                        if let Some(suggestion) = self.find_platform_ifopt_match(&response.locations, &osm_name).await {
+                            issues[idx].suggested_ifopt = Some(suggestion.0);
+                            issues[idx].suggested_ifopt_name = suggestion.1;
+                            issues[idx].suggested_ifopt_distance = suggestion.2;
+                            continue;
+                        }
+                    }
+
+                    // Fallback to station-level IFOPT
+                    if let Some(suggestion) = self.find_station_ifopt_match(&response.locations, &osm_name) {
+                        issues[idx].suggested_ifopt = Some(suggestion.0);
+                        issues[idx].suggested_ifopt_name = suggestion.1;
+                        issues[idx].suggested_ifopt_distance = suggestion.2;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        osm_id = issue.osm_id,
+                        error = %e,
+                        "Failed to query EFA for IFOPT suggestion"
+                    );
+                }
+            }
+
+            // Small delay to avoid overwhelming the EFA API
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        let enriched_count = issues
+            .iter()
+            .filter(|i| i.suggested_ifopt.is_some())
+            .count();
+        info!(
+            enriched = enriched_count,
+            total = issues.len(),
+            "Finished enriching issues with EFA suggestions"
+        );
+    }
+
+    /// Find platform-level IFOPT by querying departures for nearby stations
+    /// Returns (ifopt, name, distance) if a good match is found
+    async fn find_platform_ifopt_match(
+        &self,
+        stations: &[crate::providers::efa::CoordLocation],
+        osm_name: &Option<String>,
+    ) -> Option<(String, Option<String>, Option<u32>)> {
+        if stations.is_empty() {
+            return None;
+        }
+
+        // Extract platform ref from OSM name if present (e.g., "a", "b", "1", "2")
+        let osm_ref = osm_name.as_ref().and_then(|name| {
+            // Look for patterns like "Bstg. a", "Platform a", or just single letter/number at end
+            let name_lower = name.to_lowercase();
+            if let Some(idx) = name_lower.rfind(|c: char| c.is_whitespace()) {
+                let suffix = &name[idx + 1..];
+                if suffix.len() <= 2 {
+                    return Some(suffix.to_lowercase());
+                }
+            }
+            // Check if name is just a single letter/number
+            if name.len() <= 2 && name.chars().all(|c| c.is_alphanumeric()) {
+                return Some(name.to_lowercase());
+            }
+            None
+        });
+
+        // Try the closest stations
+        for station in stations.iter().take(3) {
+            let station_ifopt = match station.ifopt() {
+                Some(id) => id,
+                None => continue,
+            };
+            let station_distance = station.distance_meters();
+
+            // Query platforms for this station
+            match self.efa_client.get_station_platforms(station_ifopt).await {
+                Ok(platforms) => {
+                    // If we have an OSM ref, try to match it to a platform
+                    if let Some(ref osm_ref) = osm_ref {
+                        for platform in &platforms {
+                            if let Some(ref efa_ref) = platform.platform {
+                                if efa_ref.to_lowercase() == *osm_ref {
+                                    let name = platform.name.clone()
+                                        .or_else(|| platform.station_name.clone());
+                                    return Some((platform.ifopt.clone(), name, station_distance));
+                                }
+                            }
+                        }
+                    }
+
+                    // If only one platform, suggest it
+                    if platforms.len() == 1 {
+                        let platform = &platforms[0];
+                        let name = platform.name.clone()
+                            .or_else(|| platform.station_name.clone());
+                        return Some((platform.ifopt.clone(), name, station_distance));
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        station = station_ifopt,
+                        error = %e,
+                        "Failed to query platforms for station"
+                    );
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find station-level IFOPT match from EFA locations
+    /// Returns (ifopt, name, distance) if a good match is found
+    fn find_station_ifopt_match(
+        &self,
+        locations: &[crate::providers::efa::CoordLocation],
+        osm_name: &Option<String>,
+    ) -> Option<(String, Option<String>, Option<u32>)> {
+        if locations.is_empty() {
+            return None;
+        }
+
+        // If we have an OSM name, try to find a matching EFA stop
+        if let Some(osm_name) = osm_name {
+            let osm_name_lower = osm_name.to_lowercase();
+
+            for loc in locations {
+                if let Some(ifopt) = loc.ifopt() {
+                    let distance = loc.distance_meters();
+
+                    // Check if name matches (exact or partial)
+                    let efa_name = loc.name.as_deref().unwrap_or("");
+                    let efa_name_lower = efa_name.to_lowercase();
+
+                    // Consider it a match if:
+                    // 1. Names are exactly equal (case insensitive)
+                    // 2. One name contains the other
+                    // 3. Distance is very close (<50m) - likely the same stop
+                    let name_matches = osm_name_lower == efa_name_lower
+                        || osm_name_lower.contains(&efa_name_lower)
+                        || efa_name_lower.contains(&osm_name_lower);
+
+                    let very_close = distance.map_or(false, |d| d < 50);
+
+                    if name_matches || very_close {
+                        return Some((
+                            ifopt.to_string(),
+                            loc.full_name().map(|s| s.to_string()),
+                            distance,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // If no name match, use the closest stop if within 100m
+        let closest = locations.first()?;
+        let distance = closest.distance_meters()?;
+
+        if distance <= 100 {
+            if let Some(ifopt) = closest.ifopt() {
+                return Some((
+                    ifopt.to_string(),
+                    closest.full_name().map(|s| s.to_string()),
+                    Some(distance),
+                ));
+            }
+        }
+
+        None
     }
 
     /// Sync a single area (all database operations in a single transaction)
@@ -187,6 +576,9 @@ impl SyncManager {
 
         // Resolve remaining relations (fallback for unmapped platforms)
         self.resolve_relations(&mut tx, area_id).await?;
+
+        // Check for missing platform/stop_position pairs
+        self.check_platform_stop_pairs(&mut tx, area_id).await?;
 
         // Update last_synced_at
         sqlx::query("UPDATE areas SET last_synced_at = datetime('now') WHERE id = ?")
@@ -241,11 +633,49 @@ impl SyncManager {
         stations: &[OsmElement],
         area_id: i64,
     ) -> Result<(), SyncError> {
+        let mut new_issues = Vec::new();
+
         for station in stations {
-            let (lat, lon) = match (station.latitude(), station.longitude()) {
+            let name = station.tag("name").map(|s| s.to_string());
+            let lat = station.latitude();
+            let lon = station.longitude();
+            let transport_type = determine_transport_type(station);
+
+            // Check for missing coordinates
+            let (lat, lon) = match (lat, lon) {
                 (Some(lat), Some(lon)) => (lat, lon),
-                _ => continue,
+                _ => {
+                    new_issues.push(OsmIssue::new(
+                        station.id,
+                        &station.element_type,
+                        "station",
+                        OsmIssueType::MissingCoordinates,
+                        transport_type.clone(),
+                        format!("Station '{}' has no coordinates", name.as_deref().unwrap_or("unnamed")),
+                        name,
+                        None, // ref_tag
+                        None,
+                        None,
+                    ));
+                    continue;
+                }
             };
+
+            // Check for missing IFOPT
+            if station.tag("ref:IFOPT").is_none() {
+                new_issues.push(OsmIssue::new(
+                    station.id,
+                    &station.element_type,
+                    "station",
+                    OsmIssueType::MissingIfopt,
+                    transport_type,
+                    format!("Station '{}' has no ref:IFOPT tag", name.as_deref().unwrap_or("unnamed")),
+                    name.clone(),
+                    None, // ref_tag
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
 
             let tags_json = station.tags.as_ref().and_then(|t| {
                 serde_json::to_string(t)
@@ -281,6 +711,12 @@ impl SyncManager {
             .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
         }
 
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
+        }
+
         Ok(())
     }
 
@@ -292,11 +728,66 @@ impl SyncManager {
         area_id: i64,
         platform_station_map: &HashMap<i64, i64>,
     ) -> Result<(), SyncError> {
+        let mut new_issues = Vec::new();
+
         for platform in platforms {
-            let (lat, lon) = match (platform.latitude(), platform.longitude()) {
+            let name = platform.tag("name").map(|s| s.to_string());
+            let platform_ref = platform.tag("ref").map(|s| s.to_string());
+            let lat = platform.latitude();
+            let lon = platform.longitude();
+            let transport_type = determine_transport_type(platform);
+
+            // Check for missing coordinates
+            let (lat, lon) = match (lat, lon) {
                 (Some(lat), Some(lon)) => (lat, lon),
-                _ => continue,
+                _ => {
+                    new_issues.push(OsmIssue::new(
+                        platform.id,
+                        &platform.element_type,
+                        "platform",
+                        OsmIssueType::MissingCoordinates,
+                        transport_type.clone(),
+                        format!("Platform '{}' has no coordinates", name.as_deref().unwrap_or("unnamed")),
+                        name,
+                        platform_ref,
+                        None,
+                        None,
+                    ));
+                    continue;
+                }
             };
+
+            // Check for missing IFOPT
+            if platform.tag("ref:IFOPT").is_none() {
+                new_issues.push(OsmIssue::new(
+                    platform.id,
+                    &platform.element_type,
+                    "platform",
+                    OsmIssueType::MissingIfopt,
+                    transport_type.clone(),
+                    format!("Platform '{}' has no ref:IFOPT tag", name.as_deref().unwrap_or("unnamed")),
+                    name.clone(),
+                    platform_ref.clone(),
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
+
+            // Check for missing name and ref (would show as "?" on map)
+            if name.is_none() && platform_ref.is_none() {
+                new_issues.push(OsmIssue::new(
+                    platform.id,
+                    &platform.element_type,
+                    "platform",
+                    OsmIssueType::MissingName,
+                    transport_type,
+                    "Platform has no name or ref tag - displays as '?' on map".to_string(),
+                    None,
+                    None,
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
 
             let tags_json = platform.tags.as_ref().and_then(|t| {
                 serde_json::to_string(t)
@@ -339,6 +830,12 @@ impl SyncManager {
             .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
         }
 
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
+        }
+
         Ok(())
     }
 
@@ -350,11 +847,66 @@ impl SyncManager {
         area_id: i64,
         platform_station_map: &HashMap<i64, i64>,
     ) -> Result<(), SyncError> {
+        let mut new_issues = Vec::new();
+
         for stop in stop_positions {
-            let (lat, lon) = match (stop.latitude(), stop.longitude()) {
+            let name = stop.tag("name").map(|s| s.to_string());
+            let stop_ref = stop.tag("ref").map(|s| s.to_string());
+            let lat = stop.latitude();
+            let lon = stop.longitude();
+            let transport_type = determine_transport_type(stop);
+
+            // Check for missing coordinates
+            let (lat, lon) = match (lat, lon) {
                 (Some(lat), Some(lon)) => (lat, lon),
-                _ => continue,
+                _ => {
+                    new_issues.push(OsmIssue::new(
+                        stop.id,
+                        &stop.element_type,
+                        "stop_position",
+                        OsmIssueType::MissingCoordinates,
+                        transport_type.clone(),
+                        format!("Stop position '{}' has no coordinates", name.as_deref().unwrap_or("unnamed")),
+                        name,
+                        stop_ref,
+                        None,
+                        None,
+                    ));
+                    continue;
+                }
             };
+
+            // Check for missing IFOPT
+            if stop.tag("ref:IFOPT").is_none() {
+                new_issues.push(OsmIssue::new(
+                    stop.id,
+                    &stop.element_type,
+                    "stop_position",
+                    OsmIssueType::MissingIfopt,
+                    transport_type.clone(),
+                    format!("Stop position '{}' has no ref:IFOPT tag", name.as_deref().unwrap_or("unnamed")),
+                    name.clone(),
+                    stop_ref.clone(),
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
+
+            // Check for missing name and ref (would show as "?" on map)
+            if name.is_none() && stop_ref.is_none() {
+                new_issues.push(OsmIssue::new(
+                    stop.id,
+                    &stop.element_type,
+                    "stop_position",
+                    OsmIssueType::MissingName,
+                    transport_type,
+                    "Stop position has no name or ref tag - displays as '?' on map".to_string(),
+                    None,
+                    None,
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
 
             let tags_json = stop.tags.as_ref().and_then(|t| {
                 serde_json::to_string(t)
@@ -397,6 +949,12 @@ impl SyncManager {
             .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
         }
 
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
+        }
+
         Ok(())
     }
 
@@ -407,7 +965,27 @@ impl SyncManager {
         routes: &[OsmRoute],
         area_id: i64,
     ) -> Result<(), SyncError> {
+        let mut new_issues = Vec::new();
+
         for route in routes {
+            let transport_type = transport_type_from_route(&route.route_type);
+
+            // Check for missing route ref (line number)
+            if route.ref_number.is_none() {
+                new_issues.push(OsmIssue::new(
+                    route.osm_id,
+                    &route.osm_type,
+                    "route",
+                    OsmIssueType::MissingRouteRef,
+                    transport_type,
+                    format!("Route '{}' has no ref (line number) tag", route.name.as_deref().unwrap_or("unnamed")),
+                    route.name.clone(),
+                    None, // ref_tag
+                    None,
+                    None,
+                ));
+            }
+
             let tags_json = serde_json::to_string(&route.tags)
                 .map_err(|e| tracing::warn!(osm_id = route.osm_id, error = %e, "Failed to serialize route tags"))
                 .ok();
@@ -506,6 +1084,12 @@ impl SyncManager {
                 .await
                 .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
             }
+        }
+
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
         }
 
         Ok(())
@@ -657,7 +1241,159 @@ impl SyncManager {
         .await
         .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
 
+        // Detect orphaned elements (still unlinked after fallback)
+        let mut new_issues = Vec::new();
+
+        // Find orphaned platforms (no station_id after all linking attempts)
+        let orphaned_platforms: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
+            "SELECT osm_id, osm_type, name, ref, lat, lon FROM platforms WHERE area_id = ? AND station_id IS NULL",
+        )
+        .bind(area_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+
+        for (osm_id, osm_type, name, ref_tag, lat, lon) in orphaned_platforms {
+            new_issues.push(OsmIssue::new(
+                osm_id,
+                &osm_type,
+                "platform",
+                OsmIssueType::OrphanedElement,
+                TransportType::Unknown, // Transport type unknown for orphaned elements from DB query
+                format!("Platform '{}' is not linked to any station (no stop_area relation and no station within 500m)", name.as_deref().unwrap_or("unnamed")),
+                name,
+                ref_tag,
+                Some(lat),
+                Some(lon),
+            ));
+        }
+
+        // Find orphaned stop_positions (no station_id after all linking attempts)
+        let orphaned_stops: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
+            "SELECT osm_id, osm_type, name, ref, lat, lon FROM stop_positions WHERE area_id = ? AND station_id IS NULL",
+        )
+        .bind(area_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+
+        for (osm_id, osm_type, name, ref_tag, lat, lon) in orphaned_stops {
+            new_issues.push(OsmIssue::new(
+                osm_id,
+                &osm_type,
+                "stop_position",
+                OsmIssueType::OrphanedElement,
+                TransportType::Unknown, // Transport type unknown for orphaned elements from DB query
+                format!("Stop position '{}' is not linked to any station", name.as_deref().unwrap_or("unnamed")),
+                name,
+                ref_tag,
+                Some(lat),
+                Some(lon),
+            ));
+        }
+
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
+        }
+
         info!("Finished resolving relations for area {}", area_id);
+        Ok(())
+    }
+
+    /// Check for platforms without stop_positions and vice versa
+    async fn check_platform_stop_pairs(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        area_id: i64,
+    ) -> Result<(), SyncError> {
+        let mut new_issues = Vec::new();
+
+        // Distance threshold for nearby check: ~100m ≈ 0.001 degrees
+        let nearby_threshold = 0.001;
+
+        // Find platforms without any stop_position nearby (using coordinate check)
+        let platforms_without_stops: Vec<(i64, String, Option<String>, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
+            r#"
+            SELECT p.osm_id, p.osm_type, p.name, p.ref, p.ref_ifopt, p.lat, p.lon
+            FROM platforms p
+            WHERE p.area_id = ?
+            AND p.ref_ifopt IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM stop_positions sp
+                WHERE sp.area_id = p.area_id
+                AND ABS(sp.lat - p.lat) < ?
+                AND ABS(sp.lon - p.lon) < ?
+            )
+            "#,
+        )
+        .bind(area_id)
+        .bind(nearby_threshold)
+        .bind(nearby_threshold)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+
+        for (osm_id, osm_type, name, ref_tag, _ref_ifopt, lat, lon) in platforms_without_stops {
+            new_issues.push(OsmIssue::new(
+                osm_id,
+                &osm_type,
+                "platform",
+                OsmIssueType::MissingStopPosition,
+                TransportType::Unknown,
+                format!("Platform '{}' has no stop_position nearby", name.as_deref().unwrap_or("unnamed")),
+                name,
+                ref_tag,
+                Some(lat),
+                Some(lon),
+            ));
+        }
+
+        // Find stop_positions without any platform nearby (using coordinate check)
+        let stops_without_platforms: Vec<(i64, String, Option<String>, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
+            r#"
+            SELECT sp.osm_id, sp.osm_type, sp.name, sp.ref, sp.ref_ifopt, sp.lat, sp.lon
+            FROM stop_positions sp
+            WHERE sp.area_id = ?
+            AND sp.ref_ifopt IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM platforms p
+                WHERE p.area_id = sp.area_id
+                AND ABS(p.lat - sp.lat) < ?
+                AND ABS(p.lon - sp.lon) < ?
+            )
+            "#,
+        )
+        .bind(area_id)
+        .bind(nearby_threshold)
+        .bind(nearby_threshold)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+
+        for (osm_id, osm_type, name, ref_tag, _ref_ifopt, lat, lon) in stops_without_platforms {
+            new_issues.push(OsmIssue::new(
+                osm_id,
+                &osm_type,
+                "stop_position",
+                OsmIssueType::MissingPlatform,
+                TransportType::Unknown,
+                format!("Stop position '{}' has no platform nearby", name.as_deref().unwrap_or("unnamed")),
+                name,
+                ref_tag,
+                Some(lat),
+                Some(lon),
+            ));
+        }
+
+        // Store collected issues
+        if !new_issues.is_empty() {
+            let mut issues = self.issues.write().await;
+            issues.extend(new_issues);
+        }
+
+        info!("Checked platform/stop_position pairs for area {}", area_id);
         Ok(())
     }
 

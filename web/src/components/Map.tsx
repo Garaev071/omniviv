@@ -8,7 +8,13 @@ import { getPlatformDisplayName } from "./mapUtils";
 import { PlatformPopup } from "./PlatformPopup";
 import { StationPopup } from "./StationPopup";
 import { VehiclePopup } from "./VehiclePopup";
-import { calculateVehiclePosition, type VehiclePosition } from "./vehicleUtils";
+import {
+    calculateVehiclePosition,
+    createSmoothedPosition,
+    updateSmoothedPosition,
+    type SmoothedVehiclePosition,
+    type VehiclePosition,
+} from "./vehicleUtils";
 
 // Use environment variable or fallback to localhost for development
 const MAP_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL ?? "/styles/basic-preview/style.json";
@@ -79,6 +85,7 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
     const animationRef = useRef<number | null>(null);
     const lastAnimationTimeRef = useRef<number>(0);
     const vehicleIconsRef = useRef<Set<string>>(new Set());
+    const smoothedPositionsRef = useRef<globalThis.Map<string, SmoothedVehiclePosition>>(new globalThis.Map());
     const [mapLoaded, setMapLoaded] = useState(false);
 
     // Keep stationsRef in sync with stations prop
@@ -501,7 +508,7 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
     }, []); // Empty deps: map should only initialize once
 
     // Calculate vehicle positions and update the map
-    const updateVehiclePositions = useCallback(() => {
+    const updateVehiclePositions = useCallback((deltaMs: number) => {
         if (!map.current || !mapLoaded) return;
 
         const source = map.current.getSource("vehicles") as maplibregl.GeoJSONSource;
@@ -527,20 +534,34 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
         }
 
         const features: GeoJSON.Feature[] = [];
+        const activeTripIds = new Set<string>();
 
         for (const { vehicle, routeId } of vehiclesByTripId.values()) {
             const routeGeometry = routeGeometriesRef.current.get(routeId);
             const routeColor = routeColorsRef.current.get(vehicle.line_number ?? "");
 
-            const position = calculateVehiclePosition(
+            const targetPosition = calculateVehiclePosition(
                 vehicle,
                 routeGeometry ?? [],
                 now
             );
 
-            if (position && position.status !== "completed") {
+            if (targetPosition && targetPosition.status !== "completed") {
+                activeTripIds.add(targetPosition.tripId);
+
+                // Get or create smoothed position for this vehicle
+                let smoothedPosition = smoothedPositionsRef.current.get(targetPosition.tripId);
+                if (smoothedPosition) {
+                    // Update existing smoothed position toward target
+                    smoothedPosition = updateSmoothedPosition(smoothedPosition, targetPosition, deltaMs);
+                } else {
+                    // Create new smoothed position starting at target
+                    smoothedPosition = createSmoothedPosition(targetPosition);
+                }
+                smoothedPositionsRef.current.set(targetPosition.tripId, smoothedPosition);
+
                 const color = routeColor ?? "#3b82f6";
-                const lineNum = position.lineNumber ?? "?";
+                const lineNum = smoothedPosition.lineNumber ?? "?";
                 const iconId = `vehicle-${color.replace("#", "")}-${lineNum}`;
 
                 // Create icon for this color+lineNumber combo if it doesn't exist
@@ -553,22 +574,29 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
                 features.push({
                     type: "Feature",
                     properties: {
-                        tripId: position.tripId,
-                        lineNumber: position.lineNumber,
-                        destination: position.destination,
-                        status: position.status,
-                        delayMinutes: position.delayMinutes,
-                        bearing: position.bearing,
+                        tripId: smoothedPosition.tripId,
+                        lineNumber: smoothedPosition.lineNumber,
+                        destination: smoothedPosition.destination,
+                        status: smoothedPosition.status,
+                        delayMinutes: smoothedPosition.delayMinutes,
+                        bearing: smoothedPosition.renderedBearing,
                         color,
                         iconId,
-                        currentStopName: position.currentStop?.stop_name ?? null,
-                        nextStopName: position.nextStop?.stop_name ?? null,
+                        currentStopName: smoothedPosition.currentStop?.stop_name ?? null,
+                        nextStopName: smoothedPosition.nextStop?.stop_name ?? null,
                     },
                     geometry: {
                         type: "Point",
-                        coordinates: [position.lon, position.lat],
+                        coordinates: [smoothedPosition.renderedLon, smoothedPosition.renderedLat],
                     },
                 });
+            }
+        }
+
+        // Clean up smoothed positions for vehicles that are no longer active
+        for (const tripId of smoothedPositionsRef.current.keys()) {
+            if (!activeTripIds.has(tripId)) {
+                smoothedPositionsRef.current.delete(tripId);
             }
         }
 
@@ -585,20 +613,27 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
                     source.setData({ type: "FeatureCollection", features: [] });
                 }
             }
+            // Clear smoothed positions when vehicles are hidden
+            smoothedPositionsRef.current.clear();
             return;
         }
 
         const animate = (timestamp: number) => {
+            // Calculate delta time since last frame
+            const deltaMs = lastAnimationTimeRef.current > 0
+                ? timestamp - lastAnimationTimeRef.current
+                : ANIMATION_INTERVAL;
+
             // Only update at the specified interval
-            if (timestamp - lastAnimationTimeRef.current >= ANIMATION_INTERVAL) {
+            if (deltaMs >= ANIMATION_INTERVAL) {
                 lastAnimationTimeRef.current = timestamp;
-                updateVehiclePositions();
+                updateVehiclePositions(deltaMs);
             }
             animationRef.current = requestAnimationFrame(animate);
         };
 
         // Initial update
-        updateVehiclePositions();
+        updateVehiclePositions(ANIMATION_INTERVAL);
 
         // Start animation loop
         animationRef.current = requestAnimationFrame(animate);
@@ -611,10 +646,12 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
         };
     }, [mapLoaded, showVehicles, updateVehiclePositions]);
 
-    // Also update when vehicles data changes
+    // Also update when vehicles data changes (new data from backend)
     useEffect(() => {
         if (mapLoaded && showVehicles) {
-            updateVehiclePositions();
+            // When new data arrives, update immediately with a standard interval
+            // The smoothing system will handle the transition
+            updateVehiclePositions(ANIMATION_INTERVAL);
         }
     }, [vehicles, mapLoaded, showVehicles, updateVehiclePositions]);
 

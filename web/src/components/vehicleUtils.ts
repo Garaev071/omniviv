@@ -7,7 +7,7 @@ export interface VehiclePosition {
     lon: number;
     lat: number;
     bearing: number;
-    status: "at_stop" | "in_transit" | "approaching" | "completed";
+    status: "at_stop" | "in_transit" | "approaching" | "completed" | "waiting";
     currentStop?: VehicleStop;
     nextStop?: VehicleStop;
     progress: number; // 0-1 progress between stops
@@ -86,9 +86,21 @@ export function calculateVehiclePosition(
         }
 
         // Check if vehicle hasn't departed yet (before first departure)
-        // Don't show vehicles that haven't started - they're scheduled future trips
+        // Show vehicle waiting at first stop
         if (i === 0 && departureTime && now < departureTime) {
-            return null; // Filter out - trip hasn't started yet
+            return {
+                tripId: vehicle.trip_id,
+                lineNumber: vehicle.line_number,
+                destination: vehicle.destination,
+                lon: stop.lon,
+                lat: stop.lat,
+                bearing: calculateBearing(stop, stops[1]),
+                status: "waiting",
+                currentStop: stop,
+                nextStop: stops[1],
+                progress: 0,
+                delayMinutes: stop.delay_minutes ?? null,
+            };
         }
     }
 
@@ -165,7 +177,7 @@ export function calculateVehiclePosition(
         };
     }
 
-    // Vehicle hasn't started yet - show at first stop
+    // Vehicle hasn't started yet - show at first stop as waiting
     return {
         tripId: vehicle.trip_id,
         lineNumber: vehicle.line_number,
@@ -173,7 +185,7 @@ export function calculateVehiclePosition(
         lon: firstStop.lon,
         lat: firstStop.lat,
         bearing: calculateBearing(firstStop, stops[1]),
-        status: "at_stop",
+        status: "waiting",
         currentStop: firstStop,
         nextStop: stops[1],
         progress: 0,
@@ -372,4 +384,134 @@ export function easeInOutProgress(progress: number): number {
         // Cruising
         return 0.5 + (progress - 0.5);
     }
+}
+
+/**
+ * Smoothed vehicle position that tracks rendered vs target positions
+ */
+export interface SmoothedVehiclePosition extends VehiclePosition {
+    renderedLon: number;
+    renderedLat: number;
+    renderedBearing: number;
+    speedMultiplier: number;
+    lastUpdateTime: number;
+}
+
+// Thresholds for position smoothing
+const SNAP_DISTANCE_METERS = 500; // Distance above which we snap instead of smooth
+const SMOOTH_DISTANCE_METERS = 50; // Distance below which we consider "on track"
+const MAX_SPEED_MULTIPLIER = 2.0;
+const MIN_SPEED_MULTIPLIER = 0.5;
+const BEARING_SMOOTHING = 0.15; // How fast bearing catches up (0-1)
+
+/**
+ * Calculate haversine distance between two coordinates in meters
+ */
+function haversineDistanceCoords(
+    lon1: number,
+    lat1: number,
+    lon2: number,
+    lat2: number
+): number {
+    const R = 6371000; // Earth's radius in meters
+    const phi1 = (lat1 * Math.PI) / 180;
+    const phi2 = (lat2 * Math.PI) / 180;
+    const dPhi = ((lat2 - lat1) * Math.PI) / 180;
+    const dLambda = ((lon2 - lon1) * Math.PI) / 180;
+
+    const a =
+        Math.sin(dPhi / 2) * Math.sin(dPhi / 2) +
+        Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    return R * c;
+}
+
+/**
+ * Create initial smoothed position from a target position
+ */
+export function createSmoothedPosition(target: VehiclePosition): SmoothedVehiclePosition {
+    return {
+        ...target,
+        renderedLon: target.lon,
+        renderedLat: target.lat,
+        renderedBearing: target.bearing,
+        speedMultiplier: 1.0,
+        lastUpdateTime: Date.now(),
+    };
+}
+
+/**
+ * Update smoothed position to move toward target position
+ * Uses speed adjustment (acceleration/deceleration) rather than teleporting
+ */
+export function updateSmoothedPosition(
+    current: SmoothedVehiclePosition,
+    target: VehiclePosition,
+    deltaMs: number
+): SmoothedVehiclePosition {
+    const distance = haversineDistanceCoords(
+        current.renderedLon,
+        current.renderedLat,
+        target.lon,
+        target.lat
+    );
+
+    // If distance is too large, snap to target (vehicle likely jumped routes or restarted)
+    if (distance > SNAP_DISTANCE_METERS) {
+        return {
+            ...target,
+            renderedLon: target.lon,
+            renderedLat: target.lat,
+            renderedBearing: target.bearing,
+            speedMultiplier: 1.0,
+            lastUpdateTime: Date.now(),
+        };
+    }
+
+    // Calculate speed multiplier based on distance to target
+    let speedMultiplier = 1.0;
+    if (distance > SMOOTH_DISTANCE_METERS) {
+        // Determine if we're behind or ahead by comparing progress
+        const isBehind = current.progress < target.progress;
+
+        if (isBehind) {
+            // Speed up to catch up (max 2x)
+            speedMultiplier = 1.0 + (distance / SNAP_DISTANCE_METERS) * (MAX_SPEED_MULTIPLIER - 1.0);
+            speedMultiplier = Math.min(speedMultiplier, MAX_SPEED_MULTIPLIER);
+        } else {
+            // Slow down to let target catch up (min 0.5x)
+            speedMultiplier = 1.0 - (distance / SNAP_DISTANCE_METERS) * (1.0 - MIN_SPEED_MULTIPLIER);
+            speedMultiplier = Math.max(speedMultiplier, MIN_SPEED_MULTIPLIER);
+        }
+    }
+
+    // Smoothly interpolate speed multiplier to avoid jerky changes
+    const smoothedSpeedMultiplier = current.speedMultiplier + (speedMultiplier - current.speedMultiplier) * 0.1;
+
+    // Calculate how much to move toward target this frame
+    // Base movement: move fraction of distance based on delta time
+    // At 50ms intervals, we want to catch up smoothly over ~1-2 seconds
+    const catchupFactor = (deltaMs / 1000) * smoothedSpeedMultiplier * 2.0;
+    const moveFraction = Math.min(1, catchupFactor);
+
+    // Interpolate position toward target
+    const newLon = current.renderedLon + (target.lon - current.renderedLon) * moveFraction;
+    const newLat = current.renderedLat + (target.lat - current.renderedLat) * moveFraction;
+
+    // Smoothly interpolate bearing
+    let bearingDiff = target.bearing - current.renderedBearing;
+    // Handle wrap-around (e.g., 350 -> 10 should go +20, not -340)
+    if (bearingDiff > 180) bearingDiff -= 360;
+    if (bearingDiff < -180) bearingDiff += 360;
+    const newBearing = (current.renderedBearing + bearingDiff * BEARING_SMOOTHING + 360) % 360;
+
+    return {
+        ...target,
+        renderedLon: newLon,
+        renderedLat: newLat,
+        renderedBearing: newBearing,
+        speedMultiplier: smoothedSpeedMultiplier,
+        lastUpdateTime: Date.now(),
+    };
 }

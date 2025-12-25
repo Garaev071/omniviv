@@ -76,6 +76,55 @@ export enum EventType {
   Arrival = "arrival",
 }
 
+export interface IssueListResponse {
+  /** @min 0 */
+  count: number;
+  issues: OsmIssue[];
+}
+
+/** An OSM data quality issue detected during sync */
+export interface OsmIssue {
+  description: string;
+  detected_at: string;
+  element_type: string;
+  /** Types of OSM data quality issues */
+  issue_type: OsmIssueType;
+  /** @format double */
+  lat?: number | null;
+  /** @format double */
+  lon?: number | null;
+  name?: string | null;
+  /** @format int64 */
+  osm_id: number;
+  osm_type: string;
+  osm_url: string;
+  /** The ref tag value (e.g., platform letter "a", "b") */
+  ref?: string | null;
+  /** Suggested IFOPT from EFA API (for missing_ifopt issues) */
+  suggested_ifopt?: string | null;
+  /**
+   * Distance in meters to the suggested EFA stop
+   * @format int32
+   * @min 0
+   */
+  suggested_ifopt_distance?: number | null;
+  /** Name of the EFA stop that was matched */
+  suggested_ifopt_name?: string | null;
+  /** Transport type for filtering issues */
+  transport_type: TransportType;
+}
+
+/** Types of OSM data quality issues */
+export enum OsmIssueType {
+  MissingIfopt = "missing_ifopt",
+  MissingCoordinates = "missing_coordinates",
+  OrphanedElement = "orphaned_element",
+  MissingRouteRef = "missing_route_ref",
+  MissingName = "missing_name",
+  MissingStopPosition = "missing_stop_position",
+  MissingPlatform = "missing_platform",
+}
+
 export interface Route {
   /** @format int64 */
   area_id?: number | null;
@@ -172,6 +221,14 @@ export interface StopDeparturesRequest {
 export interface StopDeparturesResponse {
   departures: Departure[];
   stop_ifopt: string;
+}
+
+/** Transport type for filtering issues */
+export enum TransportType {
+  Tram = "tram",
+  Bus = "bus",
+  Train = "train",
+  Unknown = "unknown",
 }
 
 export interface Vehicle {
@@ -532,6 +589,22 @@ export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDa
         method: "POST",
         body: data,
         type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags issues
+     * @name ListIssues
+     * @summary List all OSM data quality issues
+     * @request GET:/api/issues
+     */
+    listIssues: (params: RequestParams = {}) =>
+      this.request<IssueListResponse, any>({
+        path: `/api/issues`,
+        method: "GET",
         format: "json",
         ...params,
       }),
