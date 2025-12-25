@@ -1,2 +1,10 @@
 pub mod list;
-pub mod stop_events;
+
+use axum::Router;
+use sqlx::SqlitePool;
+
+pub fn router(pool: SqlitePool) -> Router {
+    Router::new()
+        .route("/", axum::routing::get(list::list_stations))
+        .with_state(pool)
+}

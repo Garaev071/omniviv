@@ -1,3 +1,4 @@
 pub mod api;
-pub mod models;
-pub mod services;
+pub mod config;
+pub mod providers;
+pub mod sync;

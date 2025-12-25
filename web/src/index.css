@@ -171,6 +171,29 @@ button {
     padding: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
+    border-radius: 0 !important;
+}
+
+/* Custom popup container styling */
+.map-popup {
+    background: white;
+    border-radius: 0.5rem;
+    box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+/* Popup close button styling */
+.maplibregl-popup-close-button {
+    font-size: 1.5rem;
+    padding: 0.25rem 0.5rem;
+    color: #6b7280;
+    right: 0.25rem;
+    top: 0.25rem;
+}
+
+.maplibregl-popup-close-button:hover {
+    background: #f3f4f6;
+    border-radius: 0.25rem;
+    color: #374151;
 }
 
 /* Keep the popup tip/arrow styled */

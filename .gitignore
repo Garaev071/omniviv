@@ -1,1 +1,6 @@
 *.mbtiles
+
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example

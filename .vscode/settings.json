@@ -9,12 +9,19 @@
                 }
             ]
         },
-
         {
             "splitTerminals": [
                 {
                     "name": "backend",
-                    "commands": ["cd server"]
+                    "commands": ["cd server", "cargo watch -x run"]
+                }
+            ]
+        },
+        {
+            "splitTerminals": [
+                {
+                    "name": "claude",
+                    "commands": ["claude --resume"]
                 }
             ]
         }
