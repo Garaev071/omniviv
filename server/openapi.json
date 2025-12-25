@@ -529,12 +529,13 @@
       },
       "Departure": {
         "type": "object",
-        "description": "A departure from a stop",
+        "description": "A stop event (departure or arrival)",
         "required": [
           "stop_ifopt",
+          "event_type",
           "line_number",
           "destination",
-          "planned_departure"
+          "planned_time"
         ],
         "properties": {
           "delay_minutes": {
@@ -545,18 +546,22 @@
             "format": "int32"
           },
           "destination": {
-            "type": "string"
+            "type": "string",
+            "description": "For departures: destination; for arrivals: origin"
           },
-          "estimated_departure": {
+          "estimated_time": {
             "type": [
               "string",
               "null"
             ]
           },
+          "event_type": {
+            "$ref": "#/components/schemas/EventType"
+          },
           "line_number": {
             "type": "string"
           },
-          "planned_departure": {
+          "planned_time": {
             "type": "string"
           },
           "platform": {
@@ -594,6 +599,14 @@
             "type": "string"
           }
         }
+      },
+      "EventType": {
+        "type": "string",
+        "description": "Type of stop event",
+        "enum": [
+          "departure",
+          "arrival"
+        ]
       },
       "Route": {
         "type": "object",

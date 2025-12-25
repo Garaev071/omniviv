@@ -1,8 +1,8 @@
 use crate::config::{Area, Config};
-use crate::providers::efa::EfaClient;
+use crate::providers::efa::{EfaClient, StopEventType};
 use crate::providers::osm::{OsmClient, OsmElement, OsmRoute};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,16 +10,37 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use utoipa::ToSchema;
 
-/// A departure from a stop
+/// Type of stop event
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EventType {
+    Departure,
+    Arrival,
+}
+
+/// A stop event (departure or arrival)
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Departure {
     pub stop_ifopt: String,
+    pub event_type: EventType,
     pub line_number: String,
+    /// For departures: destination; for arrivals: origin
     pub destination: String,
-    pub planned_departure: String,
-    pub estimated_departure: Option<String>,
+    pub planned_time: String,
+    pub estimated_time: Option<String>,
     pub delay_minutes: Option<i32>,
     pub platform: Option<String>,
+}
+
+// Keep backward compatibility with old field names
+impl Departure {
+    pub fn planned_departure(&self) -> &str {
+        &self.planned_time
+    }
+
+    pub fn estimated_departure(&self) -> Option<&str> {
+        self.estimated_time.as_deref()
+    }
 }
 
 /// In-memory store for departure data
@@ -672,13 +693,13 @@ impl SyncManager {
         }
 
         let ifopts: Vec<String> = stop_ifopts.into_iter().map(|(ifopt,)| ifopt).collect();
-        info!(count = ifopts.len(), "Fetching departures for stops");
+        info!(count = ifopts.len(), "Fetching departures and arrivals for stops");
 
-        // Batch fetch departures
-        let results = self
-            .efa_client
-            .get_departures_batch(&ifopts, 10, true)
-            .await;
+        // Fetch departures and arrivals concurrently
+        let (departure_results, arrival_results) = tokio::join!(
+            self.efa_client.get_departures_batch(&ifopts, 10, true),
+            self.efa_client.get_arrivals_batch(&ifopts, 10, true)
+        );
 
         let mut success_count = 0;
         let mut error_count = 0;
@@ -688,25 +709,52 @@ impl SyncManager {
         // This preserves existing data for stops that failed and avoids full HashMap replacement
         let mut store = self.departures.write().await;
 
-        for (ifopt, result) in results {
+        // Process departures
+        for (ifopt, result) in departure_results {
             match result {
                 Ok(response) => {
-                    let departures = self.parse_departures(&ifopt, &response.stop_events, now);
-                    if departures.is_empty() {
-                        // Remove stops with no upcoming departures
-                        store.remove(&ifopt);
-                    } else {
-                        store.insert(ifopt, departures);
-                        success_count += 1;
-                    }
+                    let departures =
+                        self.parse_stop_events(&ifopt, &response.stop_events, now, EventType::Departure);
+                    // Get or create the entry for this stop
+                    let entry = store.entry(ifopt.clone()).or_insert_with(Vec::new);
+                    // Remove old departures and add new ones
+                    entry.retain(|d| d.event_type != EventType::Departure);
+                    entry.extend(departures);
+                    success_count += 1;
                 }
                 Err(e) => {
-                    // Only log at debug level since many stops may not have departures
-                    // Keep existing data for this stop on failure
                     tracing::debug!(stop = %ifopt, error = %e, "Failed to fetch departures, keeping existing data");
                     error_count += 1;
                 }
             }
+        }
+
+        // Process arrivals
+        for (ifopt, result) in arrival_results {
+            match result {
+                Ok(response) => {
+                    let arrivals =
+                        self.parse_stop_events(&ifopt, &response.stop_events, now, EventType::Arrival);
+                    // Get or create the entry for this stop
+                    let entry = store.entry(ifopt.clone()).or_insert_with(Vec::new);
+                    // Remove old arrivals and add new ones
+                    entry.retain(|d| d.event_type != EventType::Arrival);
+                    entry.extend(arrivals);
+                    success_count += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(stop = %ifopt, error = %e, "Failed to fetch arrivals, keeping existing data");
+                    error_count += 1;
+                }
+            }
+        }
+
+        // Clean up stops with no events
+        store.retain(|_, events| !events.is_empty());
+
+        // Sort events by time for each stop
+        for events in store.values_mut() {
+            events.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
         }
 
         // Release lock before logging
@@ -715,18 +763,19 @@ impl SyncManager {
         info!(
             success = success_count,
             errors = error_count,
-            "Completed departure sync"
+            "Completed departure/arrival sync"
         );
     }
 
     /// Parse stop events into Departure structs
-    fn parse_departures(
+    fn parse_stop_events(
         &self,
         stop_ifopt: &str,
         stop_events: &[crate::providers::efa::StopEvent],
         now: DateTime<Utc>,
+        event_type: EventType,
     ) -> Vec<Departure> {
-        let mut departures = Vec::new();
+        let mut events = Vec::new();
 
         for event in stop_events {
             let line_number = match event.line_number() {
@@ -734,24 +783,42 @@ impl SyncManager {
                 None => continue,
             };
 
-            let destination = match event.destination() {
-                Some(d) => d.to_string(),
+            // For departures, use destination; for arrivals, use origin
+            let destination = match event_type {
+                EventType::Departure => match event.destination() {
+                    Some(d) => d.to_string(),
+                    None => continue,
+                },
+                EventType::Arrival => match event.origin() {
+                    Some(o) => o.to_string(),
+                    None => continue,
+                },
+            };
+
+            // Get planned and estimated times based on event type
+            let (planned, estimated) = match event_type {
+                EventType::Departure => (
+                    event.planned_departure().map(|s| s.to_string()),
+                    event.estimated_departure().map(|s| s.to_string()),
+                ),
+                EventType::Arrival => (
+                    event.planned_arrival().map(|s| s.to_string()),
+                    event.estimated_arrival().map(|s| s.to_string()),
+                ),
+            };
+
+            let planned = match planned {
+                Some(p) => p,
                 None => continue,
             };
 
-            let planned = match event.planned_departure() {
-                Some(p) => p.to_string(),
-                None => continue,
-            };
-
-            // Skip departures in the past
+            // Skip events in the past
             if let Ok(planned_dt) = DateTime::parse_from_rfc3339(&planned) {
                 if planned_dt < now {
                     continue;
                 }
             }
 
-            let estimated = event.estimated_departure().map(|s| s.to_string());
             let platform = event.platform().map(|s| s.to_string());
 
             // Calculate delay in minutes if we have both planned and estimated times
@@ -772,18 +839,19 @@ impl SyncManager {
                 _ => None,
             };
 
-            departures.push(Departure {
+            events.push(Departure {
                 stop_ifopt: stop_ifopt.to_string(),
+                event_type,
                 line_number,
                 destination,
-                planned_departure: planned,
-                estimated_departure: estimated,
+                planned_time: planned,
+                estimated_time: estimated,
                 delay_minutes,
                 platform,
             });
         }
 
-        departures
+        events
     }
 }
 

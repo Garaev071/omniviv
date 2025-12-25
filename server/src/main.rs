@@ -52,6 +52,7 @@ use sync::SyncManager;
         api::departures::StopDeparturesRequest,
         api::departures::StopDeparturesResponse,
         sync::Departure,
+        sync::EventType,
     )),
     tags(
         (name = "areas", description = "Area management endpoints"),

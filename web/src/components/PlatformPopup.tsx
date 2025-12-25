@@ -1,6 +1,6 @@
 import { Terminal } from "lucide-react";
-import { useEffect, useState } from "react";
-import { Api, type Departure, type StationPlatform, type StationStopPosition } from "../api";
+import { useEffect, useMemo, useState } from "react";
+import { Api, EventType, type Departure, type StationPlatform, type StationStopPosition } from "../api";
 import { formatTime, getPlatformDisplayName } from "./mapUtils";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
@@ -13,9 +13,15 @@ interface PlatformPopupProps {
 }
 
 export function PlatformPopup({ platform, stationName, routeColors }: PlatformPopupProps) {
-    const [departures, setDepartures] = useState<Departure[]>([]);
+    const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
     const displayName = getPlatformDisplayName(platform);
+
+    // Filter to only show departures
+    const departures = useMemo(
+        () => events.filter((e) => e.event_type === EventType.Departure),
+        [events]
+    );
 
     useEffect(() => {
         if (!platform.ref_ifopt) {
@@ -26,11 +32,11 @@ export function PlatformPopup({ platform, stationName, routeColors }: PlatformPo
         api.api
             .getDeparturesByStop({ stop_ifopt: platform.ref_ifopt })
             .then((res) => {
-                setDepartures(res.data?.departures ?? []);
+                setEvents(res.data?.departures ?? []);
             })
             .catch((err) => {
                 console.error("Failed to fetch departures:", err);
-                setDepartures([]);
+                setEvents([]);
             })
             .finally(() => {
                 setLoading(false);
@@ -55,15 +61,12 @@ export function PlatformPopup({ platform, stationName, routeColors }: PlatformPo
                             const delayMinutes = dep.delay_minutes ?? 0;
                             return (
                                 <div key={idx} className="flex items-center gap-3 text-sm whitespace-nowrap">
-                                    <span
-                                        className="font-mono font-semibold w-6"
-                                        style={{ color }}
-                                    >
+                                    <span className="font-mono font-semibold w-6" style={{ color }}>
                                         {dep.line_number}
                                     </span>
                                     <span className="text-gray-700">{dep.destination}</span>
                                     <span className="text-gray-500 tabular-nums">
-                                        {formatTime(dep.estimated_departure || dep.planned_departure)}
+                                        {formatTime(dep.estimated_time || dep.planned_time)}
                                     </span>
                                     {delayMinutes > 0 && (
                                         <span className="text-red-500 text-xs font-medium">+{delayMinutes}</span>

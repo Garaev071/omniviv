@@ -9,6 +9,13 @@ const EFA_BASE_URL: &str = "https://bahnland-bayern.de/efa/XML_DM_REQUEST";
 /// Maximum concurrent requests to EFA API to avoid overwhelming the service
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
+/// Type of stop event (departure or arrival)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopEventType {
+    Departure,
+    Arrival,
+}
+
 #[derive(Debug, Error)]
 pub enum EfaError {
     #[error("Network error: {0}")]
@@ -40,12 +47,13 @@ impl EfaClient {
         })
     }
 
-    /// Fetch departures for a stop by its IFOPT ID (e.g., "de:09761:101")
-    pub async fn get_departures(
+    /// Fetch stop events (departures or arrivals) for a stop by its IFOPT ID
+    async fn get_stop_events(
         &self,
         stop_ifopt: &str,
         limit: u32,
         tram_only: bool,
+        event_type: StopEventType,
     ) -> Result<DepartureResponse, EfaError> {
         let mut url = format!(
             "{}?mode=direct&name_dm={}&type_dm=stop&depType=stopEvents&outputFormat=rapidJSON&limit={}&useRealtime=1",
@@ -56,6 +64,12 @@ impl EfaClient {
 
         if tram_only {
             url.push_str("&includedMeans=4");
+        }
+
+        // Add arrival/departure filter
+        match event_type {
+            StopEventType::Departure => url.push_str("&itdDateTimeDepArr=dep"),
+            StopEventType::Arrival => url.push_str("&itdDateTimeDepArr=arr"),
         }
 
         let response = self
@@ -88,12 +102,35 @@ impl EfaClient {
         })
     }
 
-    /// Fetch departures for multiple stops concurrently with rate limiting
-    pub async fn get_departures_batch(
+    /// Fetch departures for a stop by its IFOPT ID (e.g., "de:09761:101")
+    pub async fn get_departures(
+        &self,
+        stop_ifopt: &str,
+        limit: u32,
+        tram_only: bool,
+    ) -> Result<DepartureResponse, EfaError> {
+        self.get_stop_events(stop_ifopt, limit, tram_only, StopEventType::Departure)
+            .await
+    }
+
+    /// Fetch arrivals for a stop by its IFOPT ID (e.g., "de:09761:101")
+    pub async fn get_arrivals(
+        &self,
+        stop_ifopt: &str,
+        limit: u32,
+        tram_only: bool,
+    ) -> Result<DepartureResponse, EfaError> {
+        self.get_stop_events(stop_ifopt, limit, tram_only, StopEventType::Arrival)
+            .await
+    }
+
+    /// Fetch stop events for multiple stops concurrently with rate limiting
+    pub async fn get_stop_events_batch(
         &self,
         stop_ifopts: &[String],
         limit_per_stop: u32,
         tram_only: bool,
+        event_type: StopEventType,
     ) -> Vec<(String, Result<DepartureResponse, EfaError>)> {
         let semaphore = self.rate_limiter.clone();
 
@@ -105,13 +142,37 @@ impl EfaClient {
                 async move {
                     // Acquire permit before making request (limits concurrent requests)
                     let _permit = sem.acquire().await.expect("Semaphore closed unexpectedly");
-                    let result = self.get_departures(&ifopt, limit_per_stop, tram_only).await;
+                    let result = self
+                        .get_stop_events(&ifopt, limit_per_stop, tram_only, event_type)
+                        .await;
                     (ifopt, result)
                 }
             })
             .collect();
 
         futures::future::join_all(futures).await
+    }
+
+    /// Fetch departures for multiple stops concurrently with rate limiting
+    pub async fn get_departures_batch(
+        &self,
+        stop_ifopts: &[String],
+        limit_per_stop: u32,
+        tram_only: bool,
+    ) -> Vec<(String, Result<DepartureResponse, EfaError>)> {
+        self.get_stop_events_batch(stop_ifopts, limit_per_stop, tram_only, StopEventType::Departure)
+            .await
+    }
+
+    /// Fetch arrivals for multiple stops concurrently with rate limiting
+    pub async fn get_arrivals_batch(
+        &self,
+        stop_ifopts: &[String],
+        limit_per_stop: u32,
+        tram_only: bool,
+    ) -> Vec<(String, Result<DepartureResponse, EfaError>)> {
+        self.get_stop_events_batch(stop_ifopts, limit_per_stop, tram_only, StopEventType::Arrival)
+            .await
     }
 }
 
@@ -182,6 +243,23 @@ impl StopEvent {
         self.departure_time_estimated.as_deref()
     }
 
+    /// Get the best available arrival time (estimated if available, otherwise planned)
+    pub fn arrival_time(&self) -> Option<&str> {
+        self.arrival_time_estimated
+            .as_deref()
+            .or(self.arrival_time_planned.as_deref())
+    }
+
+    /// Get the planned arrival time
+    pub fn planned_arrival(&self) -> Option<&str> {
+        self.arrival_time_planned.as_deref()
+    }
+
+    /// Get the estimated arrival time (real-time)
+    pub fn estimated_arrival(&self) -> Option<&str> {
+        self.arrival_time_estimated.as_deref()
+    }
+
     /// Get the line number (e.g., "1", "2", "3")
     pub fn line_number(&self) -> Option<&str> {
         self.transportation.as_ref()?.number.as_deref()
@@ -192,6 +270,16 @@ impl StopEvent {
         self.transportation
             .as_ref()?
             .destination
+            .as_ref()?
+            .name
+            .as_deref()
+    }
+
+    /// Get the origin name
+    pub fn origin(&self) -> Option<&str> {
+        self.transportation
+            .as_ref()?
+            .origin
             .as_ref()?
             .name
             .as_deref()

@@ -43,14 +43,17 @@ export interface AreaStats {
   stop_position_count: number;
 }
 
-/** A departure from a stop */
+/** A stop event (departure or arrival) */
 export interface Departure {
   /** @format int32 */
   delay_minutes?: number | null;
+  /** For departures: destination; for arrivals: origin */
   destination: string;
-  estimated_departure?: string | null;
+  estimated_time?: string | null;
+  /** Type of stop event */
+  event_type: EventType;
   line_number: string;
-  planned_departure: string;
+  planned_time: string;
   platform?: string | null;
   stop_ifopt: string;
 }
@@ -61,6 +64,12 @@ export interface DepartureListResponse {
 
 export interface ErrorResponse {
   error: string;
+}
+
+/** Type of stop event */
+export enum EventType {
+  Departure = "departure",
+  Arrival = "arrival",
 }
 
 export interface Route {
