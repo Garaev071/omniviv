@@ -10,8 +10,8 @@ export function getPlatformDisplayName(platform: StationPlatform | StationStopPo
     return "?";
 }
 
-// Format time from ISO string to HH:MM
+// Format time from ISO string to HH:MM:SS
 export function formatTime(isoString: string): string {
     const date = new Date(isoString);
-    return date.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
