@@ -1,6 +1,6 @@
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useCallback, useEffect, useRef, useState } from "react";
+import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Area, Station, StationPlatform, StationStopPosition } from "../api";
 import type { RouteVehicles, RouteWithGeometry } from "../App";
@@ -8,7 +8,7 @@ import { getPlatformDisplayName } from "./mapUtils";
 import { PlatformPopup } from "./PlatformPopup";
 import { StationPopup } from "./StationPopup";
 import { VehiclePopup } from "./VehiclePopup";
-import { calculateSegmentDistances, getAugsburgTramModel, type TramModel } from "./tramModels";
+import { calculateSegmentDistances, getAugsburgTramModel } from "./tramModels";
 import {
     calculateVehiclePosition,
     createSmoothedPosition,
@@ -22,16 +22,12 @@ import {
 const MAP_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL ?? "/styles/basic-preview/style.json";
 
 // Animation frame rate (how often to recalculate positions in ms)
-// 50ms = 20fps, good balance of smoothness and performance
 const ANIMATION_INTERVAL = 50;
 
-// Vehicle marker icon settings - using high resolution for crisp rendering
-const ICON_SIZE = 48; // Base size in pixels (will be scaled down by icon-size)
-const ICON_SCALE = 0.5; // Scale factor for display
+// Vehicle marker icon settings
+const ICON_SIZE = 48;
+const ICON_SCALE = 0.5;
 
-/**
- * Generate a circle icon with line number for a vehicle marker
- */
 function createVehicleIcon(color: string, lineNumber: string): ImageData {
     const size = ICON_SIZE;
     const canvas = document.createElement("canvas");
@@ -42,19 +38,16 @@ function createVehicleIcon(color: string, lineNumber: string): ImageData {
     const center = size / 2;
     const radius = size / 2 - 5;
 
-    // Draw white stroke/border
     ctx.beginPath();
     ctx.arc(center, center, radius + 3, 0, Math.PI * 2);
     ctx.fillStyle = "#ffffff";
     ctx.fill();
 
-    // Draw colored circle
     ctx.beginPath();
     ctx.arc(center, center, radius, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
 
-    // Draw line number text
     ctx.fillStyle = "#ffffff";
     ctx.font = `bold ${size * 0.45}px "Open Sans", sans-serif`;
     ctx.textAlign = "center";
@@ -75,62 +68,145 @@ interface MapProps {
     showVehicles: boolean;
 }
 
-export default function Map({ areas, stations, routes, vehicles, showAreaOutlines, showStations, showRoutes, showVehicles }: MapProps) {
-    const mapContainer = useRef<HTMLDivElement>(null);
-    const map = useRef<maplibregl.Map | null>(null);
-    const popup = useRef<maplibregl.Popup | null>(null);
-    const popupRoot = useRef<Root | null>(null);
-    const stationsRef = useRef<Station[]>(stations);
-    const routeColorsRef = useRef<globalThis.Map<string, string>>(new globalThis.Map());
-    const routeGeometriesRef = useRef<globalThis.Map<number, number[][][]>>(new globalThis.Map());
-    const vehiclesRef = useRef<RouteVehicles[]>(vehicles);
-    const animationRef = useRef<number | null>(null);
-    const lastAnimationTimeRef = useRef<number>(0);
-    const vehicleIconsRef = useRef<Set<string>>(new Set());
-    const smoothedPositionsRef = useRef<globalThis.Map<string, SmoothedVehiclePosition>>(new globalThis.Map());
-    const [mapLoaded, setMapLoaded] = useState(false);
+interface TrackingInfo {
+    lineNumber: string;
+    destination: string;
+    nextStopName: string | null;
+    progress: number;
+    secondsToNextStop: number | null;
+    status: string;
+    color: string;
+}
 
-    // Vehicle tracking state
-    const [trackedTripId, setTrackedTripId] = useState<string | null>(null);
-    const [trackingInfo, setTrackingInfo] = useState<{
-        lineNumber: string;
-        destination: string;
-        nextStopName: string | null;
-        progress: number;
-        secondsToNextStop: number | null;
-        status: string;
-        color: string;
-    } | null>(null);
-    const trackedTripIdRef = useRef<string | null>(null);
-    const tramCarsSourceAdded = useRef<boolean>(false);
+interface MapState {
+    mapLoaded: boolean;
+    trackedTripId: string | null;
+    trackingInfo: TrackingInfo | null;
+}
 
-    // Cache for valid tram car positions per vehicle
-    type SegmentPosition = { frontLon: number; frontLat: number; rearLon: number; rearLat: number };
-    const tramCarPositionsRef = useRef<globalThis.Map<string, SegmentPosition[]>>(new globalThis.Map());
+type SegmentPosition = {
+    frontLon: number;
+    frontLat: number;
+    rearLon: number;
+    rearLat: number;
+};
 
-    // Keep ref in sync with state
-    useEffect(() => {
-        trackedTripIdRef.current = trackedTripId;
-        if (!trackedTripId) {
-            setTrackingInfo(null);
+export default class Map extends React.Component<MapProps, MapState> {
+    // DOM refs
+    private mapContainer: React.RefObject<HTMLDivElement | null>;
+
+    // MapLibre instances
+    private map: maplibregl.Map | null = null;
+    private popup: maplibregl.Popup | null = null;
+    private popupRoot: Root | null = null;
+
+    // Data caches
+    private routeColors: globalThis.Map<string, string> = new globalThis.Map();
+    private routeGeometries: globalThis.Map<number, number[][][]> = new globalThis.Map();
+    private vehicleIcons: Set<string> = new Set();
+    private smoothedPositions: globalThis.Map<string, SmoothedVehiclePosition> = new globalThis.Map();
+    private tramCarPositions: globalThis.Map<string, SegmentPosition[]> = new globalThis.Map();
+
+    // Animation state
+    private animationId: number | null = null;
+    private lastAnimationTime: number = 0;
+    private tramCarsSourceAdded: boolean = false;
+
+    // Tracking state
+    private trackingAnimationId: number | null = null;
+    private isZoomingIn: boolean = false;
+    private isRightDragging: boolean = false;
+    private isLeftDragging: boolean = false;
+    private lastMouseX: number = 0;
+    private lastMouseY: number = 0;
+
+    // Bound event handlers (for cleanup)
+    private boundHandleWheel: ((e: WheelEvent) => void) | null = null;
+    private boundHandleMouseDown: ((e: MouseEvent) => void) | null = null;
+    private boundHandleMouseMove: ((e: MouseEvent) => void) | null = null;
+    private boundHandleMouseUp: ((e: MouseEvent) => void) | null = null;
+    private boundHandleContextMenu: ((e: MouseEvent) => void) | null = null;
+
+    constructor(props: MapProps) {
+        super(props);
+        this.mapContainer = React.createRef();
+        this.state = {
+            mapLoaded: false,
+            trackedTripId: null,
+            trackingInfo: null,
+        };
+    }
+
+    componentDidMount() {
+        this.initializeMap();
+        this.updateRouteData();
+    }
+
+    componentDidUpdate(prevProps: MapProps, prevState: MapState) {
+        // Update route colors and geometries when routes change
+        if (prevProps.routes !== this.props.routes) {
+            this.updateRouteData();
         }
-    }, [trackedTripId]);
 
-    // Keep stationsRef in sync with stations prop
-    useEffect(() => {
-        stationsRef.current = stations;
-    }, [stations]);
+        // Handle map loaded state changes
+        if (this.state.mapLoaded && !prevState.mapLoaded) {
+            this.updateAllMapData();
+        }
 
-    // Keep vehiclesRef in sync with vehicles prop
-    useEffect(() => {
-        vehiclesRef.current = vehicles;
-    }, [vehicles]);
+        // Handle visibility changes
+        if (this.state.mapLoaded) {
+            if (prevProps.showAreaOutlines !== this.props.showAreaOutlines || prevProps.areas !== this.props.areas) {
+                this.updateAreaOutlines();
+            }
+            if (prevProps.showStations !== this.props.showStations || prevProps.stations !== this.props.stations) {
+                this.updateStations();
+            }
+            if (prevProps.showRoutes !== this.props.showRoutes || prevProps.routes !== this.props.routes) {
+                this.updateRoutes();
+            }
+            if (prevProps.showVehicles !== this.props.showVehicles) {
+                this.handleVehicleVisibilityChange();
+            }
+            if (prevProps.vehicles !== this.props.vehicles && this.props.showVehicles) {
+                this.updateVehiclePositions(ANIMATION_INTERVAL);
+            }
+        }
 
-    // Build route colors map and geometries map from routes
-    useEffect(() => {
+        // Handle tracking state changes
+        if (prevState.trackedTripId !== this.state.trackedTripId) {
+            this.handleTrackingChange(prevState.trackedTripId);
+        }
+    }
+
+    componentWillUnmount() {
+        this.cleanup();
+    }
+
+    private cleanup() {
+        if (this.animationId) {
+            cancelAnimationFrame(this.animationId);
+            this.animationId = null;
+        }
+        if (this.trackingAnimationId) {
+            cancelAnimationFrame(this.trackingAnimationId);
+            this.trackingAnimationId = null;
+        }
+        this.cleanupTrackingListeners();
+        if (this.popupRoot) {
+            this.popupRoot.unmount();
+            this.popupRoot = null;
+        }
+        this.popup?.remove();
+        this.popup = null;
+        this.vehicleIcons.clear();
+        this.map?.remove();
+        this.map = null;
+    }
+
+    private updateRouteData() {
         const colorMap = new globalThis.Map<string, string>();
         const geometryMap = new globalThis.Map<number, number[][][]>();
-        for (const route of routes) {
+        for (const route of this.props.routes) {
             if (route.ref && route.color) {
                 colorMap.set(route.ref, route.color);
             }
@@ -138,1022 +214,250 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
                 geometryMap.set(route.osm_id, route.geometry.segments);
             }
         }
-        routeColorsRef.current = colorMap;
-        routeGeometriesRef.current = geometryMap;
-    }, [routes]);
+        this.routeColors = colorMap;
+        this.routeGeometries = geometryMap;
+    }
 
-    // Helper to show a React component in a popup
-    const showPopup = (coordinates: [number, number], content: React.ReactNode) => {
-        if (!map.current) return;
-
-        // Clean up previous popup
-        if (popupRoot.current) {
-            popupRoot.current.unmount();
-            popupRoot.current = null;
+    private updateAllMapData() {
+        this.updateAreaOutlines();
+        this.updateStations();
+        this.updateRoutes();
+        if (this.props.showVehicles) {
+            this.startVehicleAnimation();
         }
-        if (popup.current) {
-            popup.current.remove();
+    }
+
+    private showPopup = (coordinates: [number, number], content: React.ReactNode) => {
+        if (!this.map) return;
+
+        if (this.popupRoot) {
+            this.popupRoot.unmount();
+            this.popupRoot = null;
+        }
+        if (this.popup) {
+            this.popup.remove();
         }
 
-        // Create container and render React component
         const container = document.createElement("div");
         container.className = "map-popup";
-        popupRoot.current = createRoot(container);
-        popupRoot.current.render(content);
+        this.popupRoot = createRoot(container);
+        this.popupRoot.render(content);
 
-        // Create and show popup
-        popup.current = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "none" })
+        this.popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "none" })
             .setLngLat(coordinates)
             .setDOMContent(container)
-            .addTo(map.current);
+            .addTo(this.map);
 
-        // Clean up React root when popup closes
-        popup.current.on("close", () => {
-            if (popupRoot.current) {
-                popupRoot.current.unmount();
-                popupRoot.current = null;
+        this.popup.on("close", () => {
+            if (this.popupRoot) {
+                this.popupRoot.unmount();
+                this.popupRoot = null;
             }
         });
     };
 
-    useEffect(() => {
-        if (!mapContainer.current || map.current) return;
+    private initializeMap() {
+        if (!this.mapContainer.current || this.map) return;
 
-        map.current = new maplibregl.Map({
-            container: mapContainer.current,
+        this.map = new maplibregl.Map({
+            container: this.mapContainer.current,
             style: MAP_STYLE_URL,
             center: [10.898, 48.371],
             zoom: 12,
             pitch: 30,
         });
 
-        // Handle map errors (e.g., style loading failures)
-        map.current.on("error", (e) => {
+        this.map.on("error", (e) => {
             console.error("Map error:", e.error?.message || e);
         });
 
-        map.current.addControl(new maplibregl.NavigationControl(), "top-right");
-        map.current.addControl(new maplibregl.ScaleControl(), "bottom-left");
+        this.map.addControl(new maplibregl.NavigationControl(), "top-right");
+        this.map.addControl(new maplibregl.ScaleControl(), "bottom-left");
 
-        map.current.on("load", () => {
-            if (!map.current) return;
+        this.map.on("load", () => {
+            if (!this.map) return;
+            this.setupMapLayers();
+            this.setupMapEventHandlers();
+            this.setState({ mapLoaded: true });
+        });
+    }
 
-            // Add 3D buildings
-            map.current.addLayer({
-                id: "3d-buildings",
-                source: "openmaptiles",
-                "source-layer": "building",
-                type: "fill-extrusion",
-                minzoom: 12,
-                paint: {
-                    "fill-extrusion-color": "#aaa",
-                    "fill-extrusion-height": [
-                        "interpolate",
-                        ["linear"],
-                        ["zoom"],
-                        12,
-                        0,
-                        13,
-                        ["get", "render_height"],
-                    ],
-                    "fill-extrusion-base": [
-                        "interpolate",
-                        ["linear"],
-                        ["zoom"],
-                        12,
-                        0,
-                        13,
-                        ["get", "render_min_height"],
-                    ],
-                    "fill-extrusion-opacity": 0.6,
-                },
-            });
+    private setupMapLayers() {
+        if (!this.map) return;
 
-            // Add area outlines source
-            map.current.addSource("area-outlines", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add area fill layer
-            map.current.addLayer({
-                id: "area-fill",
-                type: "fill",
-                source: "area-outlines",
-                paint: {
-                    "fill-color": "#3b82f6",
-                    "fill-opacity": 0.1,
-                },
-            });
-
-            // Add area outline layer
-            map.current.addLayer({
-                id: "area-outline",
-                type: "line",
-                source: "area-outlines",
-                paint: {
-                    "line-color": "#3b82f6",
-                    "line-width": 2,
-                    "line-dasharray": [2, 2],
-                },
-            });
-
-            // Add area labels
-            map.current.addLayer({
-                id: "area-labels",
-                type: "symbol",
-                source: "area-outlines",
-                layout: {
-                    "text-field": ["get", "name"],
-                    "text-font": ["Open Sans Regular"],
-                    "text-size": 14,
-                    "text-anchor": "center",
-                },
-                paint: {
-                    "text-color": "#1e40af",
-                    "text-halo-color": "#ffffff",
-                    "text-halo-width": 2,
-                },
-            });
-
-            // Add routes source
-            map.current.addSource("routes", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add routes layer (colored lines for each route)
-            map.current.addLayer(
-                {
-                    id: "routes-line",
-                    type: "line",
-                    source: "routes",
-                    paint: {
-                        "line-color": ["coalesce", ["get", "color"], "#888888"],
-                        "line-width": 4,
-                        "line-opacity": 0.8,
-                    },
-                    layout: {
-                        "line-cap": "round",
-                        "line-join": "round",
-                    },
-                },
-                "3d-buildings" // Add below 3D buildings
-            );
-
-            // Add platform connections source (lines from station to platforms)
-            map.current.addSource("platform-connections", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add platform connections layer (thin gray lines)
-            map.current.addLayer({
-                id: "platform-connections-line",
-                type: "line",
-                source: "platform-connections",
-                paint: {
-                    "line-color": "#888",
-                    "line-width": 1,
-                    "line-opacity": 0.5,
-                },
-            });
-
-            // Add platforms source
-            map.current.addSource("platforms", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add platform circles (smaller than stations)
-            map.current.addLayer({
-                id: "platforms-circle",
-                type: "circle",
-                source: "platforms",
-                paint: {
-                    "circle-radius": 5,
-                    "circle-color": "#666",
-                    "circle-stroke-width": 1,
-                    "circle-stroke-color": "#ffffff",
-                },
-            });
-
-            // Add platform labels (only visible when zoomed in)
-            map.current.addLayer({
-                id: "platforms-label",
-                type: "symbol",
-                source: "platforms",
-                minzoom: 16,
-                layout: {
-                    "text-field": ["get", "name"],
-                    "text-font": ["Open Sans Regular"],
-                    "text-size": 10,
-                    "text-offset": [0, 0.9],
-                    "text-anchor": "top",
-                },
-                paint: {
-                    "text-color": "#333",
-                    "text-halo-color": "#ffffff",
-                    "text-halo-width": 1.5,
-                },
-            });
-
-            // Add stations source
-            map.current.addSource("stations", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add station circles (slightly larger than platforms)
-            map.current.addLayer({
-                id: "stations-circle",
-                type: "circle",
-                source: "stations",
-                paint: {
-                    "circle-radius": 6,
-                    "circle-color": "#525252",
-                    "circle-stroke-width": 1.5,
-                    "circle-stroke-color": "#ffffff",
-                },
-            });
-
-            // Add station labels
-            map.current.addLayer({
-                id: "stations-label",
-                type: "symbol",
-                source: "stations",
-                layout: {
-                    "text-field": ["get", "name"],
-                    "text-font": ["Open Sans Regular"],
-                    "text-size": 12,
-                    "text-offset": [0, 1.5],
-                    "text-anchor": "top",
-                },
-                paint: {
-                    "text-color": "#065f46",
-                    "text-halo-color": "#ffffff",
-                    "text-halo-width": 2,
-                },
-            });
-
-            // Add hover cursor for stations
-            map.current.on("mouseenter", "stations-circle", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "pointer";
-            });
-
-            map.current.on("mouseleave", "stations-circle", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "";
-            });
-
-            // Add hover cursor for platforms
-            map.current.on("mouseenter", "platforms-circle", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "pointer";
-            });
-
-            map.current.on("mouseleave", "platforms-circle", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "";
-            });
-
-            // Add click popup for stations
-            map.current.on("click", "stations-circle", (e) => {
-                if (!e.features || e.features.length === 0) return;
-
-                const feature = e.features[0];
-                const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
-                const osmId = feature.properties?.osm_id;
-
-                // Find the full station object
-                const station = stationsRef.current.find((s) => s.osm_id === osmId);
-                if (station) {
-                    const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
-                        const platformCoords: [number, number] = [platform.lon, platform.lat];
-                        showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={routeColorsRef.current} />);
-                    };
-                    showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} />);
-                }
-            });
-
-            // Add click popup for platforms/stop positions
-            map.current.on("click", "platforms-circle", (e) => {
-                if (!e.features || e.features.length === 0) return;
-
-                const feature = e.features[0];
-                const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
-                const osmId = feature.properties?.osm_id;
-                const stationName = feature.properties?.station_name;
-
-                // Find the platform or stop position object
-                for (const station of stationsRef.current) {
-                    const platform = station.platforms.find((p) => p.osm_id === osmId);
-                    if (platform) {
-                        showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={routeColorsRef.current} />);
-                        return;
-                    }
-                    const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
-                    if (stopPosition) {
-                        showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={routeColorsRef.current} />);
-                        return;
-                    }
-                }
-            });
-
-            // Add tram cars source for 3D visualization (added first so it renders below markers)
-            map.current.addSource("tram-cars", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add tram cars as 3D extruded boxes
-            map.current.addLayer({
-                id: "tram-cars-3d",
-                type: "fill-extrusion",
-                source: "tram-cars",
-                paint: {
-                    "fill-extrusion-color": ["get", "color"],
-                    "fill-extrusion-height": ["get", "height"], // Use segment-specific height
-                    "fill-extrusion-base": 0.5, // Start 0.5m above ground (on tracks)
-                    "fill-extrusion-opacity": 0.9,
-                },
-            });
-
-            tramCarsSourceAdded.current = true;
-
-            // Add vehicles source
-            map.current.addSource("vehicles", {
-                type: "geojson",
-                data: { type: "FeatureCollection", features: [] },
-            });
-
-            // Add vehicle markers as a single symbol layer with generated icons (on top of tram cars)
-            map.current.addLayer({
-                id: "vehicles-marker",
-                type: "symbol",
-                source: "vehicles",
-                layout: {
-                    "icon-image": ["get", "iconId"],
-                    "icon-size": ICON_SCALE,
-                    "icon-allow-overlap": true,
-                    "icon-ignore-placement": true,
-                },
-            });
-
-            // Add hover cursor for vehicles
-            map.current.on("mouseenter", "vehicles-marker", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "pointer";
-            });
-
-            map.current.on("mouseleave", "vehicles-marker", () => {
-                if (map.current) map.current.getCanvas().style.cursor = "";
-            });
-
-            // Add click handler for vehicles - toggle tracking
-            map.current.on("click", "vehicles-marker", (e) => {
-                if (!e.features || e.features.length === 0) return;
-
-                const feature = e.features[0];
-                const tripId = feature.properties?.tripId;
-
-                // Toggle tracking for this vehicle
-                setTrackedTripId((current) => (current === tripId ? null : tripId));
-            });
-
-            // Click on map (not on a vehicle) stops tracking
-            map.current.on("click", (e) => {
-                // Check if click was on a vehicle
-                const features = map.current?.queryRenderedFeatures(e.point, { layers: ["vehicles-marker"] });
-                if (!features || features.length === 0) {
-                    setTrackedTripId(null);
-                }
-            });
-
-            setMapLoaded(true);
+        // 3D buildings
+        this.map.addLayer({
+            id: "3d-buildings",
+            source: "openmaptiles",
+            "source-layer": "building",
+            type: "fill-extrusion",
+            minzoom: 12,
+            paint: {
+                "fill-extrusion-color": "#aaa",
+                "fill-extrusion-height": ["interpolate", ["linear"], ["zoom"], 12, 0, 13, ["get", "render_height"]],
+                "fill-extrusion-base": ["interpolate", ["linear"], ["zoom"], 12, 0, 13, ["get", "render_min_height"]],
+                "fill-extrusion-opacity": 0.6,
+            },
         });
 
-        return () => {
-            if (animationRef.current) {
-                cancelAnimationFrame(animationRef.current);
-                animationRef.current = null;
-            }
-            if (popupRoot.current) {
-                popupRoot.current.unmount();
-                popupRoot.current = null;
-            }
-            popup.current?.remove();
-            popup.current = null;
-            vehicleIconsRef.current.clear();
-            // map.remove() cleans up all event listeners, sources, and layers
-            map.current?.remove();
-            map.current = null;
-        };
-    }, []); // Empty deps: map should only initialize once
+        // Area outlines
+        this.map.addSource("area-outlines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "area-fill", type: "fill", source: "area-outlines", paint: { "fill-color": "#3b82f6", "fill-opacity": 0.1 } });
+        this.map.addLayer({ id: "area-outline", type: "line", source: "area-outlines", paint: { "line-color": "#3b82f6", "line-width": 2, "line-dasharray": [2, 2] } });
+        this.map.addLayer({ id: "area-labels", type: "symbol", source: "area-outlines", layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 14, "text-anchor": "center" }, paint: { "text-color": "#1e40af", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
 
-    // Calculate vehicle positions and update the map
-    const updateVehiclePositions = useCallback((deltaMs: number) => {
-        if (!map.current || !mapLoaded) return;
+        // Routes
+        this.map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "routes-line", type: "line", source: "routes", paint: { "line-color": ["coalesce", ["get", "color"], "#888888"], "line-width": 4, "line-opacity": 0.8 }, layout: { "line-cap": "round", "line-join": "round" } }, "3d-buildings");
 
-        const source = map.current.getSource("vehicles") as maplibregl.GeoJSONSource;
+        // Platform connections
+        this.map.addSource("platform-connections", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "platform-connections-line", type: "line", source: "platform-connections", paint: { "line-color": "#888", "line-width": 1, "line-opacity": 0.5 } });
+
+        // Platforms
+        this.map.addSource("platforms", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "platforms-circle", type: "circle", source: "platforms", paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "platforms-label", type: "symbol", source: "platforms", minzoom: 16, layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" }, paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
+
+        // Stations
+        this.map.addSource("stations", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "stations-circle", type: "circle", source: "stations", paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "stations-label", type: "symbol", source: "stations", layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" }, paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
+
+        // Tram cars (added before vehicles so markers render on top)
+        this.map.addSource("tram-cars", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "tram-cars-3d", type: "fill-extrusion", source: "tram-cars", paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-height": ["get", "height"], "fill-extrusion-base": 0.5, "fill-extrusion-opacity": 0.9 } });
+        this.tramCarsSourceAdded = true;
+
+        // Vehicles
+        this.map.addSource("vehicles", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        this.map.addLayer({ id: "vehicles-marker", type: "symbol", source: "vehicles", layout: { "icon-image": ["get", "iconId"], "icon-size": ICON_SCALE, "icon-allow-overlap": true, "icon-ignore-placement": true } });
+    }
+
+    private setupMapEventHandlers() {
+        if (!this.map) return;
+
+        // Hover cursors
+        this.map.on("mouseenter", "stations-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "stations-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
+        this.map.on("mouseenter", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
+        this.map.on("mouseenter", "vehicles-marker", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "vehicles-marker", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
+
+        // Station click
+        this.map.on("click", "stations-circle", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const feature = e.features[0];
+            const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+            const osmId = feature.properties?.osm_id;
+            const station = this.props.stations.find((s) => s.osm_id === osmId);
+            if (station) {
+                const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
+                    const platformCoords: [number, number] = [platform.lon, platform.lat];
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} />);
+                };
+                this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} />);
+            }
+        });
+
+        // Platform click
+        this.map.on("click", "platforms-circle", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const feature = e.features[0];
+            const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+            const osmId = feature.properties?.osm_id;
+            const stationName = feature.properties?.station_name;
+            for (const station of this.props.stations) {
+                const platform = station.platforms.find((p) => p.osm_id === osmId);
+                if (platform) {
+                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} />);
+                    return;
+                }
+                const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
+                if (stopPosition) {
+                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} />);
+                    return;
+                }
+            }
+        });
+
+        // Vehicle click - toggle tracking
+        this.map.on("click", "vehicles-marker", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const tripId = e.features[0].properties?.tripId;
+            this.setState((state) => ({ trackedTripId: state.trackedTripId === tripId ? null : tripId }));
+        });
+
+        // Map click - stop tracking
+        this.map.on("click", (e) => {
+            const features = this.map?.queryRenderedFeatures(e.point, { layers: ["vehicles-marker"] });
+            if (!features || features.length === 0) {
+                this.setState({ trackedTripId: null });
+            }
+        });
+    }
+
+    private updateAreaOutlines() {
+        if (!this.map || !this.state.mapLoaded) return;
+        const source = this.map.getSource("area-outlines") as maplibregl.GeoJSONSource;
         if (!source) return;
 
-        const now = new Date();
-
-        // First, deduplicate vehicles by trip_id - keep the one with most stops
-        // This handles cases where the same trip appears on multiple route variants
-        const vehiclesByTripId = new globalThis.Map<string, { vehicle: typeof vehiclesRef.current[0]["vehicles"][0]; routeId: number; stopCount: number }>();
-
-        for (const routeVehicles of vehiclesRef.current) {
-            for (const vehicle of routeVehicles.vehicles) {
-                const existing = vehiclesByTripId.get(vehicle.trip_id);
-                if (!existing || vehicle.stops.length > existing.stopCount) {
-                    vehiclesByTripId.set(vehicle.trip_id, {
-                        vehicle,
-                        routeId: routeVehicles.routeId,
-                        stopCount: vehicle.stops.length,
-                    });
-                }
-            }
-        }
-
-        // First pass: calculate all positions and track completing vehicles at each location
-        const allPositions: { position: VehiclePosition; routeId: number; routeColor: string; vehicle: typeof vehiclesRef.current[0]["vehicles"][0] }[] = [];
-        // Map of "lineNumber:stopIfopt" -> true for locations where a vehicle is completing
-        const completingAtLocation = new Set<string>();
-
-        for (const { vehicle, routeId } of vehiclesByTripId.values()) {
-            const routeGeometry = routeGeometriesRef.current.get(routeId);
-            const routeColor = routeColorsRef.current.get(vehicle.line_number ?? "") ?? "#3b82f6";
-
-            const targetPosition = calculateVehiclePosition(
-                vehicle,
-                routeGeometry ?? [],
-                now
-            );
-
-            if (targetPosition && targetPosition.status !== "completed") {
-                allPositions.push({ position: targetPosition, routeId, routeColor, vehicle });
-
-                // Track if this vehicle is approaching its final stop (on last segment)
-                const lastStop = vehicle.stops[vehicle.stops.length - 1];
-                const isOnFinalSegment = targetPosition.nextStop?.stop_ifopt === lastStop?.stop_ifopt;
-
-                // Show waiting vehicle when another vehicle is on final segment with >50% progress
-                if (isOnFinalSegment && targetPosition.progress > 0.5 && lastStop?.stop_ifopt) {
-                    completingAtLocation.add(`${targetPosition.lineNumber}:${lastStop.stop_ifopt}`);
-                }
-            }
-        }
-
-        const features: GeoJSON.Feature[] = [];
-        const activeTripIds = new Set<string>();
-
-        // Second pass: create features, filtering out waiting vehicles without a completing vehicle at the same stop
-        for (const { position: targetPosition, routeColor, vehicle } of allPositions) {
-            // Skip waiting vehicles unless there's a completing/completed vehicle at this same location
-            if (targetPosition.status === "waiting") {
-                const firstStop = vehicle.stops[0];
-                const locationKey = `${targetPosition.lineNumber}:${firstStop?.stop_ifopt}`;
-                if (!completingAtLocation.has(locationKey)) {
-                    continue;
-                }
-            }
-
-            activeTripIds.add(targetPosition.tripId);
-
-            // Get or create smoothed position for this vehicle
-            let smoothedPosition = smoothedPositionsRef.current.get(targetPosition.tripId);
-            if (smoothedPosition) {
-                // Update existing smoothed position toward target
-                smoothedPosition = updateSmoothedPosition(smoothedPosition, targetPosition, deltaMs);
-            } else {
-                // Create new smoothed position starting at target
-                smoothedPosition = createSmoothedPosition(targetPosition);
-            }
-            smoothedPositionsRef.current.set(targetPosition.tripId, smoothedPosition);
-
-            const color = routeColor;
-            const lineNum = smoothedPosition.lineNumber ?? "?";
-            const iconId = `vehicle-${color.replace("#", "")}-${lineNum}`;
-
-            // Create icon for this color+lineNumber combo if it doesn't exist
-            if (!vehicleIconsRef.current.has(iconId) && map.current) {
-                const iconData = createVehicleIcon(color, lineNum);
-                map.current.addImage(iconId, iconData);
-                vehicleIconsRef.current.add(iconId);
-            }
-
-            features.push({
-                type: "Feature",
-                properties: {
-                    tripId: smoothedPosition.tripId,
-                    lineNumber: smoothedPosition.lineNumber,
-                    destination: smoothedPosition.destination,
-                    status: smoothedPosition.status,
-                    delayMinutes: smoothedPosition.delayMinutes,
-                    bearing: smoothedPosition.renderedBearing,
-                    color,
-                    iconId,
-                    currentStopName: smoothedPosition.currentStop?.stop_name ?? null,
-                    nextStopName: smoothedPosition.nextStop?.stop_name ?? null,
-                },
-                geometry: {
-                    type: "Point",
-                    coordinates: [smoothedPosition.renderedLon, smoothedPosition.renderedLat],
-                },
-            });
-        }
-
-        // Clean up smoothed positions for vehicles that are no longer active
-        for (const tripId of smoothedPositionsRef.current.keys()) {
-            if (!activeTripIds.has(tripId)) {
-                smoothedPositionsRef.current.delete(tripId);
-                tramCarPositionsRef.current.delete(tripId);
-            }
-        }
-
-        // Check if tracked vehicle still exists
-        const currentTrackedId = trackedTripIdRef.current;
-        if (currentTrackedId && !smoothedPositionsRef.current.has(currentTrackedId)) {
-            // Tracked vehicle no longer exists, stop tracking
-            setTrackedTripId(null);
-        }
-
-        source.setData({ type: "FeatureCollection", features });
-
-        // Update tram car 3D models for all vehicles
-        if (tramCarsSourceAdded.current) {
-            const tramModel = getAugsburgTramModel();
-            const segmentDistances = calculateSegmentDistances(tramModel);
-            const tramCarFeatures: GeoJSON.Feature[] = [];
-
-            // Helper to calculate distance between two points in meters
-            const distanceMeters = (lon1: number, lat1: number, lon2: number, lat2: number): number => {
-                const R = 6371000;
-                const phi1 = (lat1 * Math.PI) / 180;
-                const phi2 = (lat2 * Math.PI) / 180;
-                const dPhi = ((lat2 - lat1) * Math.PI) / 180;
-                const dLambda = ((lon2 - lon1) * Math.PI) / 180;
-                const a = Math.sin(dPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) ** 2;
-                return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-            };
-
-            // Helper to create a tram car polygon
-            const createSegmentPolygon = (
-                frontLon: number, frontLat: number,
-                rearLon: number, rearLat: number,
-                width: number
-            ): number[][] => {
-                const metersPerDegreeLat = 111320;
-                const metersPerDegreeLon = 111320 * Math.cos((frontLat * Math.PI) / 180);
-                const dx = (frontLon - rearLon) * metersPerDegreeLon;
-                const dy = (frontLat - rearLat) * metersPerDegreeLat;
-                const length = Math.sqrt(dx * dx + dy * dy);
-                if (length < 0.1) return [];
-                const dirX = dx / length;
-                const dirY = dy / length;
-                const perpX = dirY;
-                const perpY = -dirX;
-                const halfWidth = width / 2;
-                const corners = [
-                    [frontLon + (perpX * halfWidth) / metersPerDegreeLon, frontLat + (perpY * halfWidth) / metersPerDegreeLat],
-                    [frontLon - (perpX * halfWidth) / metersPerDegreeLon, frontLat - (perpY * halfWidth) / metersPerDegreeLat],
-                    [rearLon - (perpX * halfWidth) / metersPerDegreeLon, rearLat - (perpY * halfWidth) / metersPerDegreeLat],
-                    [rearLon + (perpX * halfWidth) / metersPerDegreeLon, rearLat + (perpY * halfWidth) / metersPerDegreeLat],
-                ];
-                corners.push(corners[0]);
-                return corners;
-            };
-
-            for (const { position, routeId, routeColor } of allPositions) {
-                const smoothedPosition = smoothedPositionsRef.current.get(position.tripId);
-                if (!smoothedPosition) continue;
-
-                const routeGeometry = routeGeometriesRef.current.get(routeId) ?? [];
-                const lon = smoothedPosition.renderedLon;
-                const lat = smoothedPosition.renderedLat;
-                const bearing = smoothedPosition.renderedBearing;
-
-                // Collect all segment distances
-                const allDistances: number[] = [];
-                for (const segInfo of segmentDistances) {
-                    allDistances.push(segInfo.frontDistance, segInfo.rearDistance);
-                }
-
-                // Get track positions for all segment endpoints
-                const allTrackPositions = findPositionsAlongTrack(lon, lat, allDistances, bearing, routeGeometry);
-
-                // Calculate new segment positions and validate them
-                const newPositions: SegmentPosition[] = [];
-                let allValid = true;
-                const lastValidPositions = tramCarPositionsRef.current.get(position.tripId) ?? [];
-
-                for (let i = 0; i < segmentDistances.length; i++) {
-                    const segInfo = segmentDistances[i];
-                    const frontPos = allTrackPositions[i * 2];
-                    const rearPos = allTrackPositions[i * 2 + 1];
-
-                    // Validate segment length (should be within 50% of expected)
-                    const actualLength = distanceMeters(frontPos.lon, frontPos.lat, rearPos.lon, rearPos.lat);
-                    const expectedLength = segInfo.segment.length;
-                    const lengthRatio = actualLength / expectedLength;
-
-                    if (lengthRatio < 0.5 || lengthRatio > 1.5) {
-                        allValid = false;
-                        break;
-                    }
-
-                    // Check for teleportation
-                    if (lastValidPositions.length > 0 && lastValidPositions[i]) {
-                        const lastFront = lastValidPositions[i];
-                        const frontMovement = distanceMeters(lastFront.frontLon, lastFront.frontLat, frontPos.lon, frontPos.lat);
-                        if (frontMovement > 20) {
-                            allValid = false;
-                            break;
-                        }
-                    }
-
-                    newPositions.push({
-                        frontLon: frontPos.lon,
-                        frontLat: frontPos.lat,
-                        rearLon: rearPos.lon,
-                        rearLat: rearPos.lat,
-                    });
-                }
-
-                // Use new positions if valid, otherwise keep cached
-                const positionsToUse = (allValid && newPositions.length === segmentDistances.length)
-                    ? newPositions
-                    : lastValidPositions;
-
-                if (allValid && newPositions.length === segmentDistances.length) {
-                    tramCarPositionsRef.current.set(position.tripId, newPositions);
-                }
-
-                // Create polygon features
-                for (let i = 0; i < segmentDistances.length && i < positionsToUse.length; i++) {
-                    const segInfo = segmentDistances[i];
-                    const pos = positionsToUse[i];
-                    if (!pos) continue;
-
-                    const polygon = createSegmentPolygon(
-                        pos.frontLon, pos.frontLat,
-                        pos.rearLon, pos.rearLat,
-                        tramModel.width
-                    );
-
-                    if (polygon.length > 0) {
-                        tramCarFeatures.push({
-                            type: "Feature",
-                            properties: {
-                                color: routeColor,
-                                tripId: position.tripId,
-                                carIndex: segInfo.index,
-                                height: segInfo.segment.height,
-                            },
-                            geometry: {
-                                type: "Polygon",
-                                coordinates: [polygon],
-                            },
-                        });
-                    }
-                }
-            }
-
-            const tramCarsSource = map.current?.getSource("tram-cars") as maplibregl.GeoJSONSource;
-            if (tramCarsSource) {
-                tramCarsSource.setData({ type: "FeatureCollection", features: tramCarFeatures });
-            }
-        }
-    }, [mapLoaded]);
-
-    // Animation loop for smooth vehicle movement
-    useEffect(() => {
-        if (!mapLoaded || !showVehicles) {
-            // Clear vehicles when hidden
-            if (map.current && mapLoaded) {
-                const source = map.current.getSource("vehicles") as maplibregl.GeoJSONSource;
-                if (source) {
-                    source.setData({ type: "FeatureCollection", features: [] });
-                }
-            }
-            // Clear smoothed positions when vehicles are hidden
-            smoothedPositionsRef.current.clear();
-            return;
-        }
-
-        const animate = (timestamp: number) => {
-            // Calculate delta time since last frame
-            const deltaMs = lastAnimationTimeRef.current > 0
-                ? timestamp - lastAnimationTimeRef.current
-                : ANIMATION_INTERVAL;
-
-            // Only update at the specified interval
-            if (deltaMs >= ANIMATION_INTERVAL) {
-                lastAnimationTimeRef.current = timestamp;
-                updateVehiclePositions(deltaMs);
-            }
-            animationRef.current = requestAnimationFrame(animate);
-        };
-
-        // Initial update
-        updateVehiclePositions(ANIMATION_INTERVAL);
-
-        // Start animation loop
-        animationRef.current = requestAnimationFrame(animate);
-
-        return () => {
-            if (animationRef.current) {
-                cancelAnimationFrame(animationRef.current);
-                animationRef.current = null;
-            }
-        };
-    }, [mapLoaded, showVehicles, updateVehiclePositions]);
-
-    // Custom interaction handling when tracking a vehicle
-    useEffect(() => {
-        if (!map.current || !mapLoaded) return;
-        if (!trackedTripId) return;
-
-        const mapInstance = map.current;
-        let trackingAnimationId: number | null = null;
-        let isZoomingIn = false;
-
-        // Zoom in if too far out when starting to track
-        const MIN_TRACKING_ZOOM = 16;
-        if (mapInstance.getZoom() < MIN_TRACKING_ZOOM) {
-            const trackedPosition = smoothedPositionsRef.current.get(trackedTripId);
-            if (trackedPosition) {
-                isZoomingIn = true;
-                mapInstance.flyTo({
-                    center: [trackedPosition.renderedLon, trackedPosition.renderedLat],
-                    zoom: MIN_TRACKING_ZOOM,
-                    duration: 1000,
-                });
-                mapInstance.once("moveend", () => {
-                    isZoomingIn = false;
-                });
-            }
-        }
-
-        // Disable native handlers - we'll handle interactions ourselves
-        mapInstance.dragPan.disable();
-        mapInstance.scrollZoom.disable();
-        mapInstance.dragRotate.disable();
-
-        // Track drag state
-        let isRightDragging = false;
-        let isLeftDragging = false;
-        let lastMouseX = 0;
-        let lastMouseY = 0;
-
-        // Custom wheel handler - zoom around the tracked vehicle
-        const handleWheel = (e: WheelEvent) => {
-            e.preventDefault();
-
-            const trackedPosition = smoothedPositionsRef.current.get(trackedTripId);
-            if (!trackedPosition) return;
-
-            const currentZoom = mapInstance.getZoom();
-            const zoomDelta = -e.deltaY * 0.002;
-            const newZoom = Math.max(10, Math.min(20, currentZoom + zoomDelta));
-
-            mapInstance.setZoom(newZoom);
-        };
-
-        const handleMouseDown = (e: MouseEvent) => {
-            lastMouseX = e.clientX;
-            lastMouseY = e.clientY;
-
-            if (e.button === 2) { // Right click for rotation
-                isRightDragging = true;
-                e.preventDefault();
-            } else if (e.button === 0) { // Left click - track for potential drag
-                isLeftDragging = true;
-            }
-        };
-
-        const handleMouseMove = (e: MouseEvent) => {
-            const deltaX = e.clientX - lastMouseX;
-            const deltaY = e.clientY - lastMouseY;
-
-            // Left drag - exit tracking mode and let native pan take over immediately
-            if (isLeftDragging && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
-                isLeftDragging = false;
-
-                // Re-enable native handlers immediately
-                mapInstance.dragPan.enable();
-                mapInstance.scrollZoom.enable();
-                mapInstance.dragRotate.enable();
-
-                // Simulate mousedown to start native pan from current position
-                const canvas = mapInstance.getCanvas();
-                const syntheticEvent = new MouseEvent("mousedown", {
-                    clientX: lastMouseX,
-                    clientY: lastMouseY,
-                    button: 0,
-                    bubbles: true,
-                });
-                canvas.dispatchEvent(syntheticEvent);
-
-                // Now stop tracking (cleanup won't re-enable handlers since they're already enabled)
-                setTrackedTripId(null);
-                return;
-            }
-
-            // Right drag - rotate/pitch
-            if (isRightDragging) {
-                lastMouseX = e.clientX;
-                lastMouseY = e.clientY;
-
-                const currentBearing = mapInstance.getBearing();
-                const currentPitch = mapInstance.getPitch();
-
-                mapInstance.setBearing(currentBearing + deltaX * 0.5);
-                mapInstance.setPitch(Math.max(0, Math.min(85, currentPitch - deltaY * 0.5)));
-            }
-        };
-
-        const handleMouseUp = () => {
-            isRightDragging = false;
-            isLeftDragging = false;
-        };
-
-        // Prevent context menu on right-click
-        const handleContextMenu = (e: MouseEvent) => {
-            e.preventDefault();
-        };
-
-        // Animation loop to keep camera centered on vehicle
-        const trackVehicle = () => {
-            const trackedPosition = smoothedPositionsRef.current.get(trackedTripId);
-            if (trackedPosition && map.current) {
-                // Update camera (skip during initial zoom animation)
-                if (!isZoomingIn) {
-                    map.current.setCenter([trackedPosition.renderedLon, trackedPosition.renderedLat]);
-                }
-
-                // Calculate seconds to next stop
-                let secondsToNextStop: number | null = null;
-                if (trackedPosition.nextStop) {
-                    const arrivalTimeStr = trackedPosition.nextStop.arrival_time_estimated || trackedPosition.nextStop.arrival_time;
-                    if (arrivalTimeStr) {
-                        const arrivalTime = new Date(arrivalTimeStr).getTime();
-                        const now = Date.now();
-                        secondsToNextStop = Math.max(0, Math.round((arrivalTime - now) / 1000));
-                    }
-                }
-
-                // Get route color
-                const routeColor = routeColorsRef.current.get(trackedPosition.lineNumber) ?? "#3b82f6";
-
-                // Update tracking info
-                setTrackingInfo({
-                    lineNumber: trackedPosition.lineNumber,
-                    destination: trackedPosition.destination,
-                    nextStopName: trackedPosition.nextStop?.stop_name ?? null,
-                    progress: trackedPosition.progress,
-                    secondsToNextStop,
-                    status: trackedPosition.status,
-                    color: routeColor,
-                });
-            }
-            trackingAnimationId = requestAnimationFrame(trackVehicle);
-        };
-
-        // Set up event listeners
-        const canvas = mapInstance.getCanvas();
-        canvas.addEventListener("wheel", handleWheel, { passive: false });
-        canvas.addEventListener("mousedown", handleMouseDown);
-        canvas.addEventListener("contextmenu", handleContextMenu);
-        window.addEventListener("mousemove", handleMouseMove);
-        window.addEventListener("mouseup", handleMouseUp);
-
-        // Start tracking animation
-        trackingAnimationId = requestAnimationFrame(trackVehicle);
-
-        return () => {
-            // Clean up
-            if (trackingAnimationId) {
-                cancelAnimationFrame(trackingAnimationId);
-            }
-
-            canvas.removeEventListener("wheel", handleWheel);
-            canvas.removeEventListener("mousedown", handleMouseDown);
-            canvas.removeEventListener("contextmenu", handleContextMenu);
-            window.removeEventListener("mousemove", handleMouseMove);
-            window.removeEventListener("mouseup", handleMouseUp);
-
-            // Re-enable native handlers
-            mapInstance.dragPan.enable();
-            mapInstance.scrollZoom.enable();
-            mapInstance.dragRotate.enable();
-        };
-    }, [trackedTripId, mapLoaded]);
-
-    // Also update when vehicles data changes (new data from backend)
-    useEffect(() => {
-        if (mapLoaded && showVehicles) {
-            // When new data arrives, update immediately with a standard interval
-            // The smoothing system will handle the transition
-            updateVehiclePositions(ANIMATION_INTERVAL);
-        }
-    }, [vehicles, mapLoaded, showVehicles, updateVehiclePositions]);
-
-    // Update area outlines when areas or visibility changes
-    useEffect(() => {
-        if (!map.current || !mapLoaded) return;
-
-        const source = map.current.getSource("area-outlines") as maplibregl.GeoJSONSource;
-        if (!source) return;
-
-        if (!showAreaOutlines) {
+        if (!this.props.showAreaOutlines) {
             source.setData({ type: "FeatureCollection", features: [] });
             return;
         }
 
-        const features = areas.map((area) => ({
+        const features = this.props.areas.map((area) => ({
             type: "Feature" as const,
             properties: { name: area.name, id: area.id },
-            geometry: {
-                type: "Polygon" as const,
-                coordinates: [
-                    [
-                        [area.west, area.south],
-                        [area.east, area.south],
-                        [area.east, area.north],
-                        [area.west, area.north],
-                        [area.west, area.south],
-                    ],
-                ],
-            },
+            geometry: { type: "Polygon" as const, coordinates: [[[area.west, area.south], [area.east, area.south], [area.east, area.north], [area.west, area.north], [area.west, area.south]]] },
         }));
-
         source.setData({ type: "FeatureCollection", features });
-    }, [areas, showAreaOutlines, mapLoaded]);
+    }
 
-    // Update stations, platforms, and connections when data or visibility changes
-    useEffect(() => {
-        if (!map.current || !mapLoaded) return;
-
-        const stationSource = map.current.getSource("stations") as maplibregl.GeoJSONSource;
-        const platformSource = map.current.getSource("platforms") as maplibregl.GeoJSONSource;
-        const connectionSource = map.current.getSource("platform-connections") as maplibregl.GeoJSONSource;
+    private updateStations() {
+        if (!this.map || !this.state.mapLoaded) return;
+        const stationSource = this.map.getSource("stations") as maplibregl.GeoJSONSource;
+        const platformSource = this.map.getSource("platforms") as maplibregl.GeoJSONSource;
+        const connectionSource = this.map.getSource("platform-connections") as maplibregl.GeoJSONSource;
         if (!stationSource || !platformSource || !connectionSource) return;
 
-        if (!showStations) {
+        if (!this.props.showStations) {
             stationSource.setData({ type: "FeatureCollection", features: [] });
             platformSource.setData({ type: "FeatureCollection", features: [] });
             connectionSource.setData({ type: "FeatureCollection", features: [] });
             return;
         }
 
-        // Create station features
-        const stationFeatures = stations.map((station) => ({
+        const stationFeatures = this.props.stations.map((station) => ({
             type: "Feature" as const,
             properties: { name: station.name, osm_id: station.osm_id },
-            geometry: {
-                type: "Point" as const,
-                coordinates: [station.lon, station.lat],
-            },
+            geometry: { type: "Point" as const, coordinates: [station.lon, station.lat] },
         }));
 
-        // Create platform features and connection lines
         const platformFeatures: GeoJSON.Feature[] = [];
         const connectionFeatures: GeoJSON.Feature[] = [];
 
-        for (const station of stations) {
+        for (const station of this.props.stations) {
             const stationCoord: [number, number] = [station.lon, station.lat];
+            const addedNames = new Set<string>();
 
-            // Helper to add a platform/stop position feature
             const addPlatformFeature = (item: StationPlatform | StationStopPosition) => {
                 const coord: [number, number] = [item.lon, item.lat];
                 const displayName = getPlatformDisplayName(item);
-
                 platformFeatures.push({
                     type: "Feature",
-                    properties: {
-                        name: displayName,
-                        station_name: station.name,
-                        osm_id: item.osm_id,
-                        ref_ifopt: item.ref_ifopt,
-                    },
-                    geometry: {
-                        type: "Point",
-                        coordinates: coord,
-                    },
+                    properties: { name: displayName, station_name: station.name, osm_id: item.osm_id, ref_ifopt: item.ref_ifopt },
+                    geometry: { type: "Point", coordinates: coord },
                 });
-
-                // Add connection line from station to platform
                 connectionFeatures.push({
                     type: "Feature",
                     properties: { station_id: station.osm_id },
-                    geometry: {
-                        type: "LineString",
-                        coordinates: [stationCoord, coord],
-                    },
+                    geometry: { type: "LineString", coordinates: [stationCoord, coord] },
                 });
             };
 
-            // Add platforms first (they take precedence), deduplicating by display name
-            const addedNames = new Set<string>();
             for (const platform of station.platforms) {
                 const name = getPlatformDisplayName(platform);
                 if (!addedNames.has(name)) {
@@ -1161,8 +465,6 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
                     addPlatformFeature(platform);
                 }
             }
-
-            // Add stop positions only if no platform with same name exists
             for (const stopPosition of station.stop_positions) {
                 const name = getPlatformDisplayName(stopPosition);
                 if (!addedNames.has(name)) {
@@ -1175,82 +477,520 @@ export default function Map({ areas, stations, routes, vehicles, showAreaOutline
         stationSource.setData({ type: "FeatureCollection", features: stationFeatures });
         platformSource.setData({ type: "FeatureCollection", features: platformFeatures });
         connectionSource.setData({ type: "FeatureCollection", features: connectionFeatures });
-    }, [stations, showStations, mapLoaded]);
+    }
 
-    // Update routes when routes or visibility changes
-    useEffect(() => {
-        if (!map.current || !mapLoaded) return;
-
-        const source = map.current.getSource("routes") as maplibregl.GeoJSONSource;
+    private updateRoutes() {
+        if (!this.map || !this.state.mapLoaded) return;
+        const source = this.map.getSource("routes") as maplibregl.GeoJSONSource;
         if (!source) return;
 
-        if (!showRoutes) {
+        if (!this.props.showRoutes) {
             source.setData({ type: "FeatureCollection", features: [] });
             return;
         }
 
-        // Create features for each route's geometry segments
         const features: GeoJSON.Feature[] = [];
-
-        for (const route of routes) {
+        for (const route of this.props.routes) {
             if (!route.geometry?.segments) continue;
-
-            // Each route can have multiple segments
             for (const segment of route.geometry.segments) {
                 if (segment.length < 2) continue;
-
                 features.push({
                     type: "Feature",
-                    properties: {
-                        route_id: route.osm_id,
-                        name: route.name,
-                        ref: route.ref,
-                        color: route.color || "#888888",
-                    },
-                    geometry: {
-                        type: "LineString",
-                        coordinates: segment,
-                    },
+                    properties: { route_id: route.osm_id, name: route.name, ref: route.ref, color: route.color || "#888888" },
+                    geometry: { type: "LineString", coordinates: segment },
+                });
+            }
+        }
+        source.setData({ type: "FeatureCollection", features });
+    }
+
+    private handleVehicleVisibilityChange() {
+        if (this.props.showVehicles) {
+            this.startVehicleAnimation();
+        } else {
+            this.stopVehicleAnimation();
+            if (this.map) {
+                const source = this.map.getSource("vehicles") as maplibregl.GeoJSONSource;
+                if (source) source.setData({ type: "FeatureCollection", features: [] });
+                const tramSource = this.map.getSource("tram-cars") as maplibregl.GeoJSONSource;
+                if (tramSource) tramSource.setData({ type: "FeatureCollection", features: [] });
+            }
+            this.smoothedPositions.clear();
+            this.tramCarPositions.clear();
+        }
+    }
+
+    private startVehicleAnimation() {
+        if (this.animationId) return;
+
+        this.updateVehiclePositions(ANIMATION_INTERVAL);
+
+        const animate = (timestamp: number) => {
+            const deltaMs = this.lastAnimationTime > 0 ? timestamp - this.lastAnimationTime : ANIMATION_INTERVAL;
+            if (deltaMs >= ANIMATION_INTERVAL) {
+                this.lastAnimationTime = timestamp;
+                this.updateVehiclePositions(deltaMs);
+            }
+            this.animationId = requestAnimationFrame(animate);
+        };
+
+        this.animationId = requestAnimationFrame(animate);
+    }
+
+    private stopVehicleAnimation() {
+        if (this.animationId) {
+            cancelAnimationFrame(this.animationId);
+            this.animationId = null;
+        }
+        this.lastAnimationTime = 0;
+    }
+
+    private updateVehiclePositions = (deltaMs: number) => {
+        if (!this.map || !this.state.mapLoaded) return;
+
+        const source = this.map.getSource("vehicles") as maplibregl.GeoJSONSource;
+        if (!source) return;
+
+        const now = new Date();
+        const vehiclesByTripId = new globalThis.Map<string, { vehicle: typeof this.props.vehicles[0]["vehicles"][0]; routeId: number; stopCount: number }>();
+
+        for (const routeVehicles of this.props.vehicles) {
+            for (const vehicle of routeVehicles.vehicles) {
+                const existing = vehiclesByTripId.get(vehicle.trip_id);
+                if (!existing || vehicle.stops.length > existing.stopCount) {
+                    vehiclesByTripId.set(vehicle.trip_id, { vehicle, routeId: routeVehicles.routeId, stopCount: vehicle.stops.length });
+                }
+            }
+        }
+
+        const allPositions: { position: VehiclePosition; routeId: number; routeColor: string; vehicle: typeof this.props.vehicles[0]["vehicles"][0] }[] = [];
+        const completingAtLocation = new Set<string>();
+
+        for (const { vehicle, routeId } of vehiclesByTripId.values()) {
+            const routeGeometry = this.routeGeometries.get(routeId);
+            const routeColor = this.routeColors.get(vehicle.line_number ?? "") ?? "#3b82f6";
+            const targetPosition = calculateVehiclePosition(vehicle, routeGeometry ?? [], now);
+
+            if (targetPosition && targetPosition.status !== "completed") {
+                allPositions.push({ position: targetPosition, routeId, routeColor, vehicle });
+                const lastStop = vehicle.stops[vehicle.stops.length - 1];
+                const isOnFinalSegment = targetPosition.nextStop?.stop_ifopt === lastStop?.stop_ifopt;
+                if (isOnFinalSegment && targetPosition.progress > 0.5 && lastStop?.stop_ifopt) {
+                    completingAtLocation.add(`${targetPosition.lineNumber}:${lastStop.stop_ifopt}`);
+                }
+            }
+        }
+
+        const features: GeoJSON.Feature[] = [];
+        const activeTripIds = new Set<string>();
+
+        for (const { position: targetPosition, routeColor, vehicle } of allPositions) {
+            if (targetPosition.status === "waiting") {
+                const firstStop = vehicle.stops[0];
+                const locationKey = `${targetPosition.lineNumber}:${firstStop?.stop_ifopt}`;
+                if (!completingAtLocation.has(locationKey)) continue;
+            }
+
+            activeTripIds.add(targetPosition.tripId);
+
+            let smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
+            if (smoothedPosition) {
+                smoothedPosition = updateSmoothedPosition(smoothedPosition, targetPosition, deltaMs);
+            } else {
+                smoothedPosition = createSmoothedPosition(targetPosition);
+            }
+            this.smoothedPositions.set(targetPosition.tripId, smoothedPosition);
+
+            const lineNum = smoothedPosition.lineNumber ?? "?";
+            const iconId = `vehicle-${routeColor.replace("#", "")}-${lineNum}`;
+
+            if (!this.vehicleIcons.has(iconId) && this.map) {
+                this.map.addImage(iconId, createVehicleIcon(routeColor, lineNum));
+                this.vehicleIcons.add(iconId);
+            }
+
+            features.push({
+                type: "Feature",
+                properties: {
+                    tripId: smoothedPosition.tripId,
+                    lineNumber: smoothedPosition.lineNumber,
+                    destination: smoothedPosition.destination,
+                    status: smoothedPosition.status,
+                    delayMinutes: smoothedPosition.delayMinutes,
+                    bearing: smoothedPosition.renderedBearing,
+                    color: routeColor,
+                    iconId,
+                    currentStopName: smoothedPosition.currentStop?.stop_name ?? null,
+                    nextStopName: smoothedPosition.nextStop?.stop_name ?? null,
+                },
+                geometry: { type: "Point", coordinates: [smoothedPosition.renderedLon, smoothedPosition.renderedLat] },
+            });
+        }
+
+        // Cleanup old positions
+        for (const tripId of this.smoothedPositions.keys()) {
+            if (!activeTripIds.has(tripId)) {
+                this.smoothedPositions.delete(tripId);
+                this.tramCarPositions.delete(tripId);
+            }
+        }
+
+        // Check if tracked vehicle still exists
+        if (this.state.trackedTripId && !this.smoothedPositions.has(this.state.trackedTripId)) {
+            this.setState({ trackedTripId: null });
+        }
+
+        source.setData({ type: "FeatureCollection", features });
+
+        // Update tram cars
+        this.updateTramCars(allPositions);
+    };
+
+    private updateTramCars(allPositions: { position: VehiclePosition; routeId: number; routeColor: string }[]) {
+        if (!this.tramCarsSourceAdded || !this.map) return;
+
+        const tramModel = getAugsburgTramModel();
+        const segmentDistances = calculateSegmentDistances(tramModel);
+        const tramCarFeatures: GeoJSON.Feature[] = [];
+
+        const distanceMeters = (lon1: number, lat1: number, lon2: number, lat2: number): number => {
+            const R = 6371000;
+            const phi1 = (lat1 * Math.PI) / 180;
+            const phi2 = (lat2 * Math.PI) / 180;
+            const dPhi = ((lat2 - lat1) * Math.PI) / 180;
+            const dLambda = ((lon2 - lon1) * Math.PI) / 180;
+            const a = Math.sin(dPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        };
+
+        const createSegmentPolygon = (frontLon: number, frontLat: number, rearLon: number, rearLat: number, width: number): number[][] => {
+            const metersPerDegreeLat = 111320;
+            const metersPerDegreeLon = 111320 * Math.cos((frontLat * Math.PI) / 180);
+            const dx = (frontLon - rearLon) * metersPerDegreeLon;
+            const dy = (frontLat - rearLat) * metersPerDegreeLat;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            if (length < 0.1) return [];
+            const dirX = dx / length;
+            const dirY = dy / length;
+            const perpX = dirY;
+            const perpY = -dirX;
+            const halfWidth = width / 2;
+            const corners = [
+                [frontLon + (perpX * halfWidth) / metersPerDegreeLon, frontLat + (perpY * halfWidth) / metersPerDegreeLat],
+                [frontLon - (perpX * halfWidth) / metersPerDegreeLon, frontLat - (perpY * halfWidth) / metersPerDegreeLat],
+                [rearLon - (perpX * halfWidth) / metersPerDegreeLon, rearLat - (perpY * halfWidth) / metersPerDegreeLat],
+                [rearLon + (perpX * halfWidth) / metersPerDegreeLon, rearLat + (perpY * halfWidth) / metersPerDegreeLat],
+            ];
+            corners.push(corners[0]);
+            return corners;
+        };
+
+        for (const { position, routeId, routeColor } of allPositions) {
+            const smoothedPosition = this.smoothedPositions.get(position.tripId);
+            if (!smoothedPosition) continue;
+
+            const routeGeometry = this.routeGeometries.get(routeId) ?? [];
+            const lon = smoothedPosition.renderedLon;
+            const lat = smoothedPosition.renderedLat;
+            const bearing = smoothedPosition.renderedBearing;
+
+            const allDistances: number[] = [];
+            for (const segInfo of segmentDistances) {
+                allDistances.push(segInfo.frontDistance, segInfo.rearDistance);
+            }
+
+            const allTrackPositions = findPositionsAlongTrack(lon, lat, allDistances, bearing, routeGeometry);
+
+            const newPositions: SegmentPosition[] = [];
+            let allValid = true;
+            const lastValidPositions = this.tramCarPositions.get(position.tripId) ?? [];
+
+            for (let i = 0; i < segmentDistances.length; i++) {
+                const segInfo = segmentDistances[i];
+                const frontPos = allTrackPositions[i * 2];
+                const rearPos = allTrackPositions[i * 2 + 1];
+
+                const actualLength = distanceMeters(frontPos.lon, frontPos.lat, rearPos.lon, rearPos.lat);
+                const lengthRatio = actualLength / segInfo.segment.length;
+
+                if (lengthRatio < 0.5 || lengthRatio > 1.5) {
+                    allValid = false;
+                    break;
+                }
+
+                if (lastValidPositions.length > 0 && lastValidPositions[i]) {
+                    const lastFront = lastValidPositions[i];
+                    const frontMovement = distanceMeters(lastFront.frontLon, lastFront.frontLat, frontPos.lon, frontPos.lat);
+                    if (frontMovement > 20) {
+                        allValid = false;
+                        break;
+                    }
+                }
+
+                newPositions.push({ frontLon: frontPos.lon, frontLat: frontPos.lat, rearLon: rearPos.lon, rearLat: rearPos.lat });
+            }
+
+            const positionsToUse = (allValid && newPositions.length === segmentDistances.length) ? newPositions : lastValidPositions;
+            if (allValid && newPositions.length === segmentDistances.length) {
+                this.tramCarPositions.set(position.tripId, newPositions);
+            }
+
+            for (let i = 0; i < segmentDistances.length && i < positionsToUse.length; i++) {
+                const segInfo = segmentDistances[i];
+                const pos = positionsToUse[i];
+                if (!pos) continue;
+
+                const polygon = createSegmentPolygon(pos.frontLon, pos.frontLat, pos.rearLon, pos.rearLat, tramModel.width);
+                if (polygon.length > 0) {
+                    tramCarFeatures.push({
+                        type: "Feature",
+                        properties: { color: routeColor, tripId: position.tripId, carIndex: segInfo.index, height: segInfo.segment.height },
+                        geometry: { type: "Polygon", coordinates: [polygon] },
+                    });
+                }
+            }
+        }
+
+        const tramCarsSource = this.map.getSource("tram-cars") as maplibregl.GeoJSONSource;
+        if (tramCarsSource) {
+            tramCarsSource.setData({ type: "FeatureCollection", features: tramCarFeatures });
+        }
+    }
+
+    private handleTrackingChange(prevTrackedTripId: string | null) {
+        if (prevTrackedTripId && !this.state.trackedTripId) {
+            // Stopped tracking
+            this.cleanupTrackingListeners();
+            this.setState({ trackingInfo: null });
+            if (this.map) {
+                this.map.dragPan.enable();
+                this.map.scrollZoom.enable();
+                this.map.dragRotate.enable();
+            }
+        } else if (this.state.trackedTripId) {
+            // Started tracking
+            this.setupTrackingMode();
+        }
+    }
+
+    private setupTrackingMode() {
+        if (!this.map || !this.state.trackedTripId) return;
+
+        const mapInstance = this.map;
+        this.isZoomingIn = false;
+        this.isLeftDragging = false;
+        this.isRightDragging = false;
+        this.lastMouseX = 0;
+        this.lastMouseY = 0;
+
+        // Zoom in if needed
+        const MIN_TRACKING_ZOOM = 16;
+        if (mapInstance.getZoom() < MIN_TRACKING_ZOOM) {
+            const trackedPosition = this.smoothedPositions.get(this.state.trackedTripId);
+            if (trackedPosition) {
+                this.isZoomingIn = true;
+                mapInstance.flyTo({
+                    center: [trackedPosition.renderedLon, trackedPosition.renderedLat],
+                    zoom: MIN_TRACKING_ZOOM,
+                    duration: 1000,
+                });
+                mapInstance.once("moveend", () => {
+                    this.isZoomingIn = false;
                 });
             }
         }
 
-        source.setData({ type: "FeatureCollection", features });
-    }, [routes, showRoutes, mapLoaded]);
+        // Disable native handlers
+        mapInstance.dragPan.disable();
+        mapInstance.scrollZoom.disable();
+        mapInstance.dragRotate.disable();
 
-    return (
-        <div className="relative w-full h-full">
-            <div ref={mapContainer} className="w-full h-full" />
-            {trackingInfo && (
-                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-[calc(100%+50px)] pointer-events-none">
-                    <div className="bg-white px-4 py-3 rounded-lg shadow-lg text-sm text-gray-800 min-w-48">
-                        <div className="font-bold text-base mb-1">
-                            {trackingInfo.lineNumber} → {trackingInfo.destination}
-                        </div>
-                        {trackingInfo.nextStopName && (
-                            <div className="text-gray-600">
-                                <span className="font-medium">Next:</span> {trackingInfo.nextStopName}
+        // Set up event listeners
+        this.boundHandleWheel = this.handleTrackingWheel.bind(this);
+        this.boundHandleMouseDown = this.handleTrackingMouseDown.bind(this);
+        this.boundHandleMouseMove = this.handleTrackingMouseMove.bind(this);
+        this.boundHandleMouseUp = this.handleTrackingMouseUp.bind(this);
+        this.boundHandleContextMenu = (e: MouseEvent) => e.preventDefault();
+
+        const canvas = mapInstance.getCanvas();
+        canvas.addEventListener("wheel", this.boundHandleWheel, { passive: false });
+        canvas.addEventListener("mousedown", this.boundHandleMouseDown);
+        canvas.addEventListener("contextmenu", this.boundHandleContextMenu);
+        window.addEventListener("mousemove", this.boundHandleMouseMove);
+        window.addEventListener("mouseup", this.boundHandleMouseUp);
+
+        // Start tracking animation
+        this.startTrackingAnimation();
+    }
+
+    private cleanupTrackingListeners() {
+        if (this.trackingAnimationId) {
+            cancelAnimationFrame(this.trackingAnimationId);
+            this.trackingAnimationId = null;
+        }
+
+        if (this.map) {
+            const canvas = this.map.getCanvas();
+            if (this.boundHandleWheel) canvas.removeEventListener("wheel", this.boundHandleWheel);
+            if (this.boundHandleMouseDown) canvas.removeEventListener("mousedown", this.boundHandleMouseDown);
+            if (this.boundHandleContextMenu) canvas.removeEventListener("contextmenu", this.boundHandleContextMenu);
+        }
+        if (this.boundHandleMouseMove) window.removeEventListener("mousemove", this.boundHandleMouseMove);
+        if (this.boundHandleMouseUp) window.removeEventListener("mouseup", this.boundHandleMouseUp);
+
+        this.boundHandleWheel = null;
+        this.boundHandleMouseDown = null;
+        this.boundHandleMouseMove = null;
+        this.boundHandleMouseUp = null;
+        this.boundHandleContextMenu = null;
+
+        // Reset drag state
+        this.isLeftDragging = false;
+        this.isRightDragging = false;
+        this.lastMouseX = 0;
+        this.lastMouseY = 0;
+    }
+
+    private handleTrackingWheel(e: WheelEvent) {
+        e.preventDefault();
+        if (!this.map || !this.state.trackedTripId) return;
+
+        const trackedPosition = this.smoothedPositions.get(this.state.trackedTripId);
+        if (!trackedPosition) return;
+
+        const currentZoom = this.map.getZoom();
+        const zoomDelta = -e.deltaY * 0.002;
+        const newZoom = Math.max(10, Math.min(20, currentZoom + zoomDelta));
+        this.map.setZoom(newZoom);
+    }
+
+    private handleTrackingMouseDown(e: MouseEvent) {
+        this.lastMouseX = e.clientX;
+        this.lastMouseY = e.clientY;
+
+        if (e.button === 2) {
+            this.isRightDragging = true;
+            e.preventDefault();
+        } else if (e.button === 0) {
+            this.isLeftDragging = true;
+        }
+    }
+
+    private handleTrackingMouseMove(e: MouseEvent) {
+        if (!this.map) return;
+
+        const deltaX = e.clientX - this.lastMouseX;
+        const deltaY = e.clientY - this.lastMouseY;
+
+        if (this.isLeftDragging && (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)) {
+            this.isLeftDragging = false;
+            this.map.dragPan.enable();
+            this.map.scrollZoom.enable();
+            this.map.dragRotate.enable();
+
+            const canvas = this.map.getCanvas();
+            const syntheticEvent = new MouseEvent("mousedown", {
+                clientX: this.lastMouseX,
+                clientY: this.lastMouseY,
+                button: 0,
+                bubbles: true,
+            });
+            canvas.dispatchEvent(syntheticEvent);
+            this.setState({ trackedTripId: null });
+            return;
+        }
+
+        if (this.isRightDragging) {
+            this.lastMouseX = e.clientX;
+            this.lastMouseY = e.clientY;
+            const currentBearing = this.map.getBearing();
+            const currentPitch = this.map.getPitch();
+            this.map.setBearing(currentBearing + deltaX * 0.5);
+            this.map.setPitch(Math.max(0, Math.min(85, currentPitch - deltaY * 0.5)));
+        }
+    }
+
+    private handleTrackingMouseUp() {
+        this.isRightDragging = false;
+        this.isLeftDragging = false;
+    }
+
+    private startTrackingAnimation() {
+        const trackVehicle = () => {
+            if (!this.state.trackedTripId || !this.map) return;
+
+            const trackedPosition = this.smoothedPositions.get(this.state.trackedTripId);
+            if (trackedPosition) {
+                if (!this.isZoomingIn) {
+                    this.map.setCenter([trackedPosition.renderedLon, trackedPosition.renderedLat]);
+                }
+
+                let secondsToNextStop: number | null = null;
+                if (trackedPosition.nextStop) {
+                    const arrivalTimeStr = trackedPosition.nextStop.arrival_time_estimated || trackedPosition.nextStop.arrival_time;
+                    if (arrivalTimeStr) {
+                        const arrivalTime = new Date(arrivalTimeStr).getTime();
+                        secondsToNextStop = Math.max(0, Math.round((arrivalTime - Date.now()) / 1000));
+                    }
+                }
+
+                const routeColor = this.routeColors.get(trackedPosition.lineNumber) ?? "#3b82f6";
+
+                this.setState({
+                    trackingInfo: {
+                        lineNumber: trackedPosition.lineNumber,
+                        destination: trackedPosition.destination,
+                        nextStopName: trackedPosition.nextStop?.stop_name ?? null,
+                        progress: trackedPosition.progress,
+                        secondsToNextStop,
+                        status: trackedPosition.status,
+                        color: routeColor,
+                    },
+                });
+            }
+            this.trackingAnimationId = requestAnimationFrame(trackVehicle);
+        };
+
+        this.trackingAnimationId = requestAnimationFrame(trackVehicle);
+    }
+
+    render() {
+        const { trackingInfo } = this.state;
+
+        return (
+            <div className="relative w-full h-full">
+                <div ref={this.mapContainer} className="w-full h-full" />
+                {trackingInfo && (
+                    <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-[calc(100%+50px)] pointer-events-none">
+                        <div className="bg-white px-4 py-3 rounded-lg shadow-lg text-sm text-gray-800 min-w-48">
+                            <div className="font-bold text-base mb-1">
+                                {trackingInfo.lineNumber} → {trackingInfo.destination}
                             </div>
-                        )}
-                        <div className="flex items-center gap-2 mt-2">
-                            <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                                <div
-                                    className="h-full transition-all duration-300"
-                                    style={{
-                                        width: `${Math.round(trackingInfo.progress * 100)}%`,
-                                        backgroundColor: trackingInfo.color,
-                                    }}
-                                />
-                            </div>
-                            {trackingInfo.secondsToNextStop !== null && (
-                                <span className="text-xs text-gray-500 font-mono tabular-nums">
-                                    {`${Math.floor(trackingInfo.secondsToNextStop / 60)}m ${String(trackingInfo.secondsToNextStop % 60).padStart(2, "0")}s`}
-                                </span>
+                            {trackingInfo.nextStopName && (
+                                <div className="text-gray-600">
+                                    <span className="font-medium">Next:</span> {trackingInfo.nextStopName}
+                                </div>
                             )}
+                            <div className="flex items-center gap-2 mt-2">
+                                <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full transition-all duration-300"
+                                        style={{
+                                            width: `${Math.round(trackingInfo.progress * 100)}%`,
+                                            backgroundColor: trackingInfo.color,
+                                        }}
+                                    />
+                                </div>
+                                {trackingInfo.secondsToNextStop !== null && (
+                                    <span className="text-xs text-gray-500 font-mono tabular-nums">
+                                        {`${Math.floor(trackingInfo.secondsToNextStop / 60)}m ${String(trackingInfo.secondsToNextStop % 60).padStart(2, "0")}s`}
+                                    </span>
+                                )}
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
-        </div>
-    );
+                )}
+            </div>
+        );
+    }
 }
