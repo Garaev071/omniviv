@@ -1,6 +1,6 @@
 use crate::config::{Area, Config};
-use crate::providers::efa::EfaClient;
 use crate::providers::osm::{OsmClient, OsmElement, OsmRoute};
+use crate::providers::timetables::germany::bavaria::EfaClient;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -464,7 +464,7 @@ impl SyncManager {
     /// Returns (ifopt, name, distance) if a good match is found
     async fn find_platform_ifopt_match(
         &self,
-        stations: &[crate::providers::efa::CoordLocation],
+        stations: &[crate::providers::timetables::germany::bavaria::CoordLocation],
         osm_name: &Option<String>,
     ) -> Option<(String, Option<String>, Option<u32>)> {
         if stations.is_empty() {
@@ -537,7 +537,7 @@ impl SyncManager {
     /// Returns (ifopt, name, distance) if a good match is found
     fn find_station_ifopt_match(
         &self,
-        locations: &[crate::providers::efa::CoordLocation],
+        locations: &[crate::providers::timetables::germany::bavaria::CoordLocation],
         osm_name: &Option<String>,
     ) -> Option<(String, Option<String>, Option<u32>)> {
         if locations.is_empty() {
@@ -1645,7 +1645,7 @@ impl SyncManager {
     fn parse_stop_events(
         &self,
         _station_ifopt: &str, // Station IFOPT we queried (kept for logging)
-        stop_events: &[crate::providers::efa::StopEvent],
+        stop_events: &[crate::providers::timetables::germany::bavaria::StopEvent],
         now: DateTime<Utc>,
         event_type: EventType,
     ) -> Vec<Departure> {
