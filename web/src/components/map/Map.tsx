@@ -14,6 +14,14 @@ import { MapLayerManager } from "./MapLayerManager";
 const MAP_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL ?? "/styles/basic-preview/style.json";
 const ANIMATION_INTERVAL = 50;
 
+type PickMode = "start" | "end" | null;
+
+interface NavigationLocation {
+    name: string;
+    lat: number;
+    lon: number;
+}
+
 interface MapProps {
     areas: Area[];
     stations: Station[];
@@ -27,12 +35,34 @@ interface MapProps {
     showVehicles: boolean;
     debugOptions: DebugOptions;
     simulatedTime: Date;
+    onSetNavigationStart?: (lat: number, lon: number) => void;
+    onSetNavigationEnd?: (lat: number, lon: number) => void;
+    pickMode?: PickMode;
+    onCancelPickMode?: () => void;
+    navigationStart?: NavigationLocation | null;
+    navigationEnd?: NavigationLocation | null;
+}
+
+interface ContextMenuState {
+    visible: boolean;
+    x: number;
+    y: number;
+    lng: number;
+    lat: number;
+}
+
+interface MeasurementState {
+    startPoint: { lng: number; lat: number } | null;
+    endPoint: { lng: number; lat: number } | null;
+    isActive: boolean;
 }
 
 interface MapState {
     mapLoaded: boolean;
     trackedTripId: string | null;
     trackingInfo: TrackingInfo | null;
+    contextMenu: ContextMenuState | null;
+    measurement: MeasurementState;
 }
 
 export default class Map extends React.Component<MapProps, MapState> {
@@ -57,6 +87,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             mapLoaded: false,
             trackedTripId: null,
             trackingInfo: null,
+            contextMenu: null,
+            measurement: {
+                startPoint: null,
+                endPoint: null,
+                isActive: false,
+            },
         };
     }
 
@@ -119,6 +155,21 @@ export default class Map extends React.Component<MapProps, MapState> {
         // Update vehicles when debug options change
         if (prevProps.debugOptions !== this.props.debugOptions && this.props.showVehicles) {
             this.updateVehicles();
+        }
+
+        // Update cursor for pick mode
+        if (prevProps.pickMode !== this.props.pickMode && this.map) {
+            if (this.props.pickMode) {
+                this.map.getCanvas().style.cursor = "crosshair";
+            } else if (!this.state.measurement.isActive) {
+                this.map.getCanvas().style.cursor = "";
+            }
+        }
+
+        // Update navigation points layer
+        if (prevProps.navigationStart !== this.props.navigationStart ||
+            prevProps.navigationEnd !== this.props.navigationEnd) {
+            this.updateNavigationPointsLayer();
         }
     }
 
@@ -324,13 +375,342 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.setState((state) => ({ trackedTripId: state.trackedTripId === tripId ? null : tripId }));
         });
 
-        // Map click - stop tracking
+        // Map click - handle pick mode, measurement, stop tracking, close context menu
         this.map.on("click", (e) => {
+            this.setState({ contextMenu: null });
+
+            // Handle pick mode for navigation
+            if (this.props.pickMode) {
+                if (this.props.pickMode === "start" && this.props.onSetNavigationStart) {
+                    this.props.onSetNavigationStart(e.lngLat.lat, e.lngLat.lng);
+                } else if (this.props.pickMode === "end" && this.props.onSetNavigationEnd) {
+                    this.props.onSetNavigationEnd(e.lngLat.lat, e.lngLat.lng);
+                }
+                return;
+            }
+
+            // Handle measurement mode
+            if (this.state.measurement.isActive) {
+                this.handleMeasurementClick(e.lngLat.lng, e.lngLat.lat);
+                return;
+            }
+
             const features = this.map?.queryRenderedFeatures(e.point, { layers: ["vehicles-marker"] });
             if (!features || features.length === 0) {
                 this.setState({ trackedTripId: null });
             }
         });
+
+        // Right-click context menu
+        this.map.on("contextmenu", (e) => {
+            e.preventDefault();
+            this.setState({
+                contextMenu: {
+                    visible: true,
+                    x: e.point.x,
+                    y: e.point.y,
+                    lng: e.lngLat.lng,
+                    lat: e.lngLat.lat,
+                },
+            });
+        });
+    }
+
+    private closeContextMenu = () => {
+        this.setState({ contextMenu: null });
+    };
+
+    private copyCoordinates = async () => {
+        const { contextMenu } = this.state;
+        if (!contextMenu) return;
+
+        const coordString = `${contextMenu.lat.toFixed(6)}, ${contextMenu.lng.toFixed(6)}`;
+        try {
+            await navigator.clipboard.writeText(coordString);
+        } catch (err) {
+            console.error("Failed to copy coordinates:", err);
+        }
+        this.closeContextMenu();
+    };
+
+    private setAsNavigationStart = () => {
+        const { contextMenu } = this.state;
+        if (!contextMenu || !this.props.onSetNavigationStart) return;
+
+        this.props.onSetNavigationStart(contextMenu.lat, contextMenu.lng);
+        this.closeContextMenu();
+    };
+
+    private setAsNavigationEnd = () => {
+        const { contextMenu } = this.state;
+        if (!contextMenu || !this.props.onSetNavigationEnd) return;
+
+        this.props.onSetNavigationEnd(contextMenu.lat, contextMenu.lng);
+        this.closeContextMenu();
+    };
+
+    private startMeasurement = () => {
+        const { contextMenu } = this.state;
+        if (!contextMenu) return;
+
+        this.setState({
+            measurement: {
+                startPoint: { lng: contextMenu.lng, lat: contextMenu.lat },
+                endPoint: null,
+                isActive: true,
+            },
+            contextMenu: null,
+        }, () => {
+            this.updateMeasurementLayer();
+        });
+
+        // Change cursor to crosshair
+        if (this.map) {
+            this.map.getCanvas().style.cursor = "crosshair";
+        }
+    };
+
+    private handleMeasurementClick = (lng: number, lat: number) => {
+        const { measurement } = this.state;
+        if (!measurement.isActive || !measurement.startPoint) return;
+
+        // Reset cursor
+        if (this.map) {
+            this.map.getCanvas().style.cursor = "";
+        }
+
+        this.setState({
+            measurement: {
+                ...measurement,
+                endPoint: { lng, lat },
+                isActive: false,
+            },
+        }, () => {
+            this.updateMeasurementLayer();
+        });
+    };
+
+    private clearMeasurement = () => {
+        // Reset cursor
+        if (this.map) {
+            this.map.getCanvas().style.cursor = "";
+        }
+
+        this.setState({
+            measurement: {
+                startPoint: null,
+                endPoint: null,
+                isActive: false,
+            },
+        }, () => {
+            this.updateMeasurementLayer();
+        });
+    };
+
+    private calculateDistance(start: { lng: number; lat: number }, end: { lng: number; lat: number }): number {
+        // Haversine formula
+        const R = 6371000; // Earth's radius in meters
+        const lat1 = (start.lat * Math.PI) / 180;
+        const lat2 = (end.lat * Math.PI) / 180;
+        const deltaLat = ((end.lat - start.lat) * Math.PI) / 180;
+        const deltaLng = ((end.lng - start.lng) * Math.PI) / 180;
+
+        const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+            Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+        return R * c;
+    }
+
+    private formatDistance(meters: number): string {
+        if (meters < 1000) {
+            return `${meters.toFixed(0)} m`;
+        }
+        return `${(meters / 1000).toFixed(2)} km`;
+    }
+
+    private updateNavigationPointsLayer() {
+        if (!this.map) return;
+
+        const sourceId = "navigation-points";
+        const { navigationStart, navigationEnd } = this.props;
+
+        const pointsData: GeoJSON.FeatureCollection = {
+            type: "FeatureCollection",
+            features: [],
+        };
+
+        if (navigationStart) {
+            pointsData.features.push({
+                type: "Feature",
+                geometry: {
+                    type: "Point",
+                    coordinates: [navigationStart.lon, navigationStart.lat],
+                },
+                properties: { type: "start", name: navigationStart.name },
+            });
+        }
+
+        if (navigationEnd) {
+            pointsData.features.push({
+                type: "Feature",
+                geometry: {
+                    type: "Point",
+                    coordinates: [navigationEnd.lon, navigationEnd.lat],
+                },
+                properties: { type: "end", name: navigationEnd.name },
+            });
+        }
+
+        const source = this.map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+
+        if (source) {
+            source.setData(pointsData);
+        } else {
+            this.map.addSource(sourceId, { type: "geojson", data: pointsData });
+
+            // Start point - green circle
+            this.map.addLayer({
+                id: "navigation-start-point",
+                type: "circle",
+                source: sourceId,
+                filter: ["==", ["get", "type"], "start"],
+                paint: {
+                    "circle-radius": 10,
+                    "circle-color": "#22c55e",
+                    "circle-stroke-color": "#ffffff",
+                    "circle-stroke-width": 3,
+                },
+            });
+
+            // End point - red circle
+            this.map.addLayer({
+                id: "navigation-end-point",
+                type: "circle",
+                source: sourceId,
+                filter: ["==", ["get", "type"], "end"],
+                paint: {
+                    "circle-radius": 10,
+                    "circle-color": "#ef4444",
+                    "circle-stroke-color": "#ffffff",
+                    "circle-stroke-width": 3,
+                },
+            });
+
+            // Start point inner dot
+            this.map.addLayer({
+                id: "navigation-start-inner",
+                type: "circle",
+                source: sourceId,
+                filter: ["==", ["get", "type"], "start"],
+                paint: {
+                    "circle-radius": 4,
+                    "circle-color": "#ffffff",
+                },
+            });
+
+            // End point inner dot
+            this.map.addLayer({
+                id: "navigation-end-inner",
+                type: "circle",
+                source: sourceId,
+                filter: ["==", ["get", "type"], "end"],
+                paint: {
+                    "circle-radius": 4,
+                    "circle-color": "#ffffff",
+                },
+            });
+        }
+    }
+
+    private updateMeasurementLayer() {
+        if (!this.map) return;
+
+        const { measurement } = this.state;
+        const sourceId = "measurement-line";
+        const pointsSourceId = "measurement-points";
+
+        // Create line data
+        const lineData: GeoJSON.FeatureCollection = {
+            type: "FeatureCollection",
+            features: [],
+        };
+
+        const pointsData: GeoJSON.FeatureCollection = {
+            type: "FeatureCollection",
+            features: [],
+        };
+
+        if (measurement.startPoint) {
+            pointsData.features.push({
+                type: "Feature",
+                geometry: {
+                    type: "Point",
+                    coordinates: [measurement.startPoint.lng, measurement.startPoint.lat],
+                },
+                properties: { type: "start" },
+            });
+
+            if (measurement.endPoint) {
+                pointsData.features.push({
+                    type: "Feature",
+                    geometry: {
+                        type: "Point",
+                        coordinates: [measurement.endPoint.lng, measurement.endPoint.lat],
+                    },
+                    properties: { type: "end" },
+                });
+
+                lineData.features.push({
+                    type: "Feature",
+                    geometry: {
+                        type: "LineString",
+                        coordinates: [
+                            [measurement.startPoint.lng, measurement.startPoint.lat],
+                            [measurement.endPoint.lng, measurement.endPoint.lat],
+                        ],
+                    },
+                    properties: {},
+                });
+            }
+        }
+
+        // Update or create sources and layers
+        const lineSource = this.map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
+        const pointsSource = this.map.getSource(pointsSourceId) as maplibregl.GeoJSONSource | undefined;
+
+        if (lineSource) {
+            lineSource.setData(lineData);
+        } else {
+            this.map.addSource(sourceId, { type: "geojson", data: lineData });
+            this.map.addLayer({
+                id: "measurement-line",
+                type: "line",
+                source: sourceId,
+                paint: {
+                    "line-color": "#f97316",
+                    "line-width": 3,
+                    "line-dasharray": [2, 2],
+                },
+            });
+        }
+
+        if (pointsSource) {
+            pointsSource.setData(pointsData);
+        } else {
+            this.map.addSource(pointsSourceId, { type: "geojson", data: pointsData });
+            this.map.addLayer({
+                id: "measurement-points",
+                type: "circle",
+                source: pointsSourceId,
+                paint: {
+                    "circle-radius": 6,
+                    "circle-color": "#f97316",
+                    "circle-stroke-color": "#ffffff",
+                    "circle-stroke-width": 2,
+                },
+            });
+        }
     }
 
     private handleVehicleVisibilityChange() {
@@ -369,7 +749,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     render() {
-        const { trackingInfo } = this.state;
+        const { trackingInfo, contextMenu } = this.state;
 
         return (
             <div className="relative w-full h-full bg-black">
@@ -402,6 +782,95 @@ export default class Map extends React.Component<MapProps, MapState> {
                                 )}
                             </div>
                         </div>
+                    </div>
+                )}
+                {contextMenu && (
+                    <div
+                        className="absolute z-50 bg-popover border rounded-md shadow-md py-1 min-w-40"
+                        style={{ left: contextMenu.x, top: contextMenu.y }}
+                    >
+                        <button
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
+                            onClick={this.copyCoordinates}
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                            Copy coordinates
+                        </button>
+                        <button
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
+                            onClick={this.startMeasurement}
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" />
+                            </svg>
+                            Measure distance
+                        </button>
+                        <div className="border-t my-1" />
+                        <button
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
+                            onClick={this.setAsNavigationStart}
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <circle cx="12" cy="12" r="3" />
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 2v4m0 12v4m10-10h-4M6 12H2" />
+                            </svg>
+                            Set as start
+                        </button>
+                        <button
+                            className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
+                            onClick={this.setAsNavigationEnd}
+                        >
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                            Set as destination
+                        </button>
+                        <div className="px-3 py-1 text-xs text-muted-foreground border-t mt-1 pt-1 font-mono">
+                            {contextMenu.lat.toFixed(6)}, {contextMenu.lng.toFixed(6)}
+                        </div>
+                    </div>
+                )}
+                {this.props.pickMode && (
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-popover border rounded-md shadow-md px-4 py-2 flex items-center gap-3">
+                        <span className="text-sm">
+                            Click to set {this.props.pickMode === "start" ? "start" : "destination"} location
+                        </span>
+                        <button
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                            onClick={this.props.onCancelPickMode}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                )}
+                {this.state.measurement.isActive && !this.props.pickMode && (
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-popover border rounded-md shadow-md px-4 py-2 flex items-center gap-3">
+                        <span className="text-sm">Click to set end point</span>
+                        <button
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                            onClick={this.clearMeasurement}
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                )}
+                {this.state.measurement.startPoint && this.state.measurement.endPoint && (
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-popover border rounded-md shadow-md px-4 py-2 flex items-center gap-3">
+                        <svg className="h-4 w-4 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" />
+                        </svg>
+                        <span className="text-sm font-medium">
+                            {this.formatDistance(this.calculateDistance(this.state.measurement.startPoint, this.state.measurement.endPoint))}
+                        </span>
+                        <button
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                            onClick={this.clearMeasurement}
+                        >
+                            Clear
+                        </button>
                     </div>
                 )}
             </div>

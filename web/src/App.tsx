@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Bug, Clock, Layers, Moon, Navigation, Sun, Wifi, WifiOff } from "lucide-react";
+import { Activity, Bug, Clock, Layers, Navigation, Settings, Wifi, WifiOff } from "lucide-react";
+import { TbWorldX } from "react-icons/tb";
 import { Api, Area, Route, RouteGeometry, Station, Vehicle } from "./api";
+import { BackendDiagnosticsPanel } from "./components/BackendDiagnosticsPanel";
+import { FeaturesPanel } from "./components/FeaturesPanel";
 import { OsmIssuesPanel } from "./components/IssuesPanel";
-import { NavigationPanel } from "./components/NavigationPanel";
+import { NavigationPanel, type Location, type PickMode } from "./components/NavigationPanel";
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
@@ -11,7 +14,7 @@ import type { DebugOptions } from "./components/vehicles/VehicleRenderer";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
 
-type SidebarPanel = "navigation" | "layers" | "debug" | "issues" | "time" | null;
+type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | "efa" | null;
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 const api = new Api({ baseUrl: API_URL });
@@ -93,6 +96,11 @@ export default function App() {
     const [activePanel, setActivePanel] = useState<SidebarPanel>(null);
     const [osmIssuesCount, setOsmIssuesCount] = useState<number | null>(null);
 
+    // Navigation state
+    const [navStart, setNavStart] = useState<Location | null>(null);
+    const [navEnd, setNavEnd] = useState<Location | null>(null);
+    const [pickMode, setPickMode] = useState<PickMode>(null);
+
     // Theme state
     const [isDark, setIsDark] = useState(() => {
         const stored = localStorage.getItem("theme");
@@ -134,6 +142,32 @@ export default function App() {
     const togglePanel = (panel: SidebarPanel) => {
         setActivePanel((current) => (current === panel ? null : panel));
     };
+
+    // Navigation callbacks for map context menu and pick mode
+    const handleSetNavigationStart = useCallback((lat: number, lon: number) => {
+        setNavStart({
+            name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+            lat,
+            lon,
+        });
+        setPickMode(null);
+        setActivePanel("navigation");
+    }, []);
+
+    const handleSetNavigationEnd = useCallback((lat: number, lon: number) => {
+        setNavEnd({
+            name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+            lat,
+            lon,
+        });
+        setPickMode(null);
+        setActivePanel("navigation");
+    }, []);
+
+    // Handler for pick mode changes from NavigationPanel
+    const handlePickModeChange = useCallback((mode: PickMode) => {
+        setPickMode(mode);
+    }, []);
 
     // Fetch OSM issues count
     useEffect(() => {
@@ -247,6 +281,7 @@ export default function App() {
                         size="icon"
                         onClick={() => togglePanel("navigation")}
                         className="m-2"
+                        title="Route Planning"
                         aria-label="Route Planning"
                     >
                         <Navigation className="h-5 w-5" />
@@ -256,27 +291,54 @@ export default function App() {
                         size="icon"
                         onClick={() => togglePanel("layers")}
                         className="m-2"
+                        title="Layers"
                         aria-label="Layers"
                     >
                         <Layers className="h-5 w-5" />
                     </Button>
                     <Button
-                        variant={activePanel === "debug" ? "default" : "ghost"}
+                        variant={activePanel === "time" ? "default" : "ghost"}
                         size="icon"
-                        onClick={() => togglePanel("debug")}
-                        className="m-2"
-                        aria-label="Debug"
+                        onClick={() => togglePanel("time")}
+                        className="m-2 relative"
+                        title="Time Control"
+                        aria-label="Time Control"
                     >
-                        <Bug className="h-5 w-5" />
+                        <Clock className="h-5 w-5" />
+                        {!timeSimulation.isRealTime && (
+                            <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-xs rounded-full h-3 w-3" />
+                        )}
+                    </Button>
+                    <div className="flex-1" />
+                    <Button
+                        variant={activePanel === "features" ? "default" : "ghost"}
+                        size="icon"
+                        onClick={() => togglePanel("features")}
+                        className="m-2"
+                        title="Settings"
+                        aria-label="Settings"
+                    >
+                        <Settings className="h-5 w-5" />
+                    </Button>
+                    <Button
+                        variant={activePanel === "efa" ? "default" : "ghost"}
+                        size="icon"
+                        onClick={() => togglePanel("efa")}
+                        className="m-2"
+                        title="Backend Diagnostics"
+                        aria-label="Backend Diagnostics"
+                    >
+                        <Activity className="h-5 w-5" />
                     </Button>
                     <Button
                         variant={activePanel === "issues" ? "default" : "ghost"}
                         size="icon"
                         onClick={() => togglePanel("issues")}
                         className="m-2 relative"
+                        title="OSM Issues"
                         aria-label="OSM Issues"
                     >
-                        <AlertTriangle className="h-5 w-5" />
+                        <TbWorldX className="h-5 w-5" />
                         {osmIssuesCount !== null && osmIssuesCount > 0 && (
                             <span
                                 className="absolute -top-1 -right-1 bg-orange-500 text-white text-xs rounded-full h-5 min-w-5 flex items-center justify-center px-1"
@@ -287,26 +349,14 @@ export default function App() {
                         )}
                     </Button>
                     <Button
-                        variant={activePanel === "time" ? "default" : "ghost"}
+                        variant={activePanel === "debug" ? "default" : "ghost"}
                         size="icon"
-                        onClick={() => togglePanel("time")}
-                        className="m-2 relative"
-                        aria-label="Time Control"
-                    >
-                        <Clock className="h-5 w-5" />
-                        {!timeSimulation.isRealTime && (
-                            <span className="absolute -top-1 -right-1 bg-orange-500 text-white text-xs rounded-full h-3 w-3" />
-                        )}
-                    </Button>
-                    <div className="flex-1" />
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => setIsDark(!isDark)}
+                        onClick={() => togglePanel("debug")}
                         className="m-2"
-                        aria-label="Toggle theme"
+                        title="Debug"
+                        aria-label="Debug"
                     >
-                        {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+                        <Bug className="h-5 w-5" />
                     </Button>
                 </div>
 
@@ -314,7 +364,15 @@ export default function App() {
                 {activePanel && (
                     <div className="w-80 h-full bg-background border-r shadow-lg overflow-y-auto">
                         {activePanel === "navigation" && (
-                            <NavigationPanel stations={stations} />
+                            <NavigationPanel
+                                stations={stations}
+                                startLocation={navStart}
+                                endLocation={navEnd}
+                                onStartChange={setNavStart}
+                                onEndChange={setNavEnd}
+                                pickMode={pickMode}
+                                onPickModeChange={handlePickModeChange}
+                            />
                         )}
 
                         {activePanel === "layers" && (
@@ -419,6 +477,10 @@ export default function App() {
                             </div>
                         )}
 
+                        {activePanel === "features" && (
+                            <FeaturesPanel isDark={isDark} onThemeChange={setIsDark} />
+                        )}
+
                         {activePanel === "debug" && (
                             <div className="p-4">
                                 <h2 className="font-semibold mb-4">Debug</h2>
@@ -458,6 +520,10 @@ export default function App() {
                         {activePanel === "time" && (
                             <TimeControlPanel timeSimulation={timeSimulation} />
                         )}
+
+                        {activePanel === "efa" && (
+                            <BackendDiagnosticsPanel />
+                        )}
                     </div>
                 )}
             </div>
@@ -477,6 +543,12 @@ export default function App() {
                     showVehicles={showVehicles}
                     debugOptions={debugOptions}
                     simulatedTime={timeSimulation.currentTime}
+                    onSetNavigationStart={handleSetNavigationStart}
+                    onSetNavigationEnd={handleSetNavigationEnd}
+                    pickMode={pickMode}
+                    onCancelPickMode={() => setPickMode(null)}
+                    navigationStart={navStart}
+                    navigationEnd={navEnd}
                 />
             </div>
         </div>

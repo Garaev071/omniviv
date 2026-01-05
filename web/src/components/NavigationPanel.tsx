@@ -1,5 +1,6 @@
-import { useState, useRef } from "react";
-import { Crosshair, MapPin } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { MapPin } from "lucide-react";
+import { TbMapX } from "react-icons/tb";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Popover, PopoverContent, PopoverAnchor } from "./ui/popover";
@@ -20,21 +21,30 @@ interface LocationInputProps {
     onUseCurrentLocation?: () => void;
     onPickOnMap?: () => void;
     isLocating?: boolean;
+    isPickingLocation?: boolean;
 }
 
 function LocationInput({
     label,
-    placeholder = "Search station...",
+    placeholder = "Search location...",
     stations,
     value,
     onChange,
     onUseCurrentLocation,
     onPickOnMap,
     isLocating,
+    isPickingLocation,
 }: LocationInputProps) {
     const [query, setQuery] = useState(value?.name ?? "");
     const [isOpen, setIsOpen] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
+
+    // Update query when value changes externally (e.g., from map picking)
+    useEffect(() => {
+        if (value) {
+            setQuery(value.name);
+        }
+    }, [value]);
 
     const filteredStations = query.length > 0 && !value
         ? stations.filter(s => s.name.toLowerCase().includes(query.toLowerCase())).slice(0, 5)
@@ -100,17 +110,17 @@ function LocationInput({
                         disabled={isLocating}
                         title="Use current location"
                     >
-                        <Crosshair className="h-4 w-4" />
+                        <MapPin className="h-4 w-4" />
                     </Button>
                 )}
                 {onPickOnMap && (
                     <Button
-                        variant="outline"
+                        variant={isPickingLocation ? "default" : "outline"}
                         size="icon"
                         onClick={onPickOnMap}
                         title="Pick on map"
                     >
-                        <MapPin className="h-4 w-4" />
+                        <TbMapX className="h-4 w-4" />
                     </Button>
                 )}
             </div>
@@ -118,14 +128,37 @@ function LocationInput({
     );
 }
 
+type PickMode = "start" | "end" | null;
+
 interface NavigationPanelProps {
     stations: Station[];
+    startLocation: Location | null;
+    endLocation: Location | null;
+    onStartChange: (location: Location | null) => void;
+    onEndChange: (location: Location | null) => void;
+    pickMode: PickMode;
+    onPickModeChange: (mode: PickMode) => void;
 }
 
-export function NavigationPanel({ stations }: NavigationPanelProps) {
-    const [startLocation, setStartLocation] = useState<Location | null>(null);
-    const [endLocation, setEndLocation] = useState<Location | null>(null);
+export type { Location };
+
+export { type PickMode };
+
+export function NavigationPanel({
+    stations,
+    startLocation,
+    endLocation,
+    onStartChange,
+    onEndChange,
+    pickMode,
+    onPickModeChange,
+}: NavigationPanelProps) {
     const [isLocating, setIsLocating] = useState(false);
+
+    const handlePickOnMap = (mode: PickMode) => {
+        // Toggle pick mode - if already picking this one, cancel
+        onPickModeChange(pickMode === mode ? null : mode);
+    };
 
     const handleUseCurrentLocation = (setLocation: (loc: Location) => void) => {
         if (!navigator.geolocation) {
@@ -160,20 +193,22 @@ export function NavigationPanel({ stations }: NavigationPanelProps) {
                     label="Start"
                     stations={stations}
                     value={startLocation}
-                    onChange={setStartLocation}
-                    onUseCurrentLocation={() => handleUseCurrentLocation(setStartLocation)}
-                    onPickOnMap={() => {}}
+                    onChange={onStartChange}
+                    onUseCurrentLocation={() => handleUseCurrentLocation(onStartChange)}
+                    onPickOnMap={() => handlePickOnMap("start")}
                     isLocating={isLocating}
+                    isPickingLocation={pickMode === "start"}
                 />
 
                 <LocationInput
                     label="Destination"
                     stations={stations}
                     value={endLocation}
-                    onChange={setEndLocation}
-                    onUseCurrentLocation={() => handleUseCurrentLocation(setEndLocation)}
-                    onPickOnMap={() => {}}
+                    onChange={onEndChange}
+                    onUseCurrentLocation={() => handleUseCurrentLocation(onEndChange)}
+                    onPickOnMap={() => handlePickOnMap("end")}
                     isLocating={isLocating}
+                    isPickingLocation={pickMode === "end"}
                 />
 
                 <Button
