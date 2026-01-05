@@ -23,14 +23,6 @@ clicking on vehicles does sometimes send the click through to a platform near it
 
 # overlapping vehicles
 
-Sometimes vehicles are overlapping due to similar timings, of course they cant overlap in real life so we need to adjust here too, also good for interface purposes, the vehicle that is minimal behind on the geometry should slow down so that its 3d model and/or indicator wont overlap with the other vehicles, if 2 vehicles have exactly the same timing the one with the higher ascii index or line number should slow down
+Sometimes vehicles are overlapping due to similar timings, of course they cant overlap in real life so we need to adjust here too, also good for interface purposes, the vehicle that is minimal behind on the geometry should slow down so that its 3d model and/or indicator wont overlap with the other vehicles, if 2 vehicles have exactly the same timing the one with the higher ascii index or line number should slow down. It may be necessary that they intersect for a short while, while overtaking although not possible in real life fro trams this may be needed to keep their timing at stations. The goal here is to prevent driving in each other on the same line MOST OF THE TIME.
 
 # station departure monitors should show departure in minutes and seconds
-
-# additional wait time at stations that have none
-
-adjust the vehicles to stop at stations in the case they have no explicit wait time at a station, this should follow the following rules:
-
--   should stop at random stations
--   should stop at most stations earlier in the day 95% of the time it should wait
--   should stop more rarely the later the time of day it is, 50% at the end of the day
