@@ -132,6 +132,7 @@ async fn main() {
     );
     let departure_store = sync_manager.departure_store();
     let issue_store = sync_manager.issue_store();
+    let vehicle_updates_tx = sync_manager.vehicle_updates_sender();
     let sync_manager_clone = sync_manager.clone();
     tokio::spawn(async move {
         sync_manager_clone.start().await;
@@ -141,7 +142,7 @@ async fn main() {
     #[allow(unused_mut)] // mut needed when dev-tools feature is enabled
     let mut app = Router::new()
         .route("/", get(root))
-        .nest("/api", api::router(pool.clone(), departure_store, issue_store))
+        .nest("/api", api::router(pool.clone(), departure_store, issue_store, vehicle_updates_tx))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);

@@ -21,7 +21,7 @@ pub struct VehiclesByRouteResponse {
     pub vehicles: Vec<Vehicle>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Vehicle {
     /// Unique trip identifier (AVMSTripID from EFA)
     pub trip_id: String,
@@ -35,7 +35,7 @@ pub struct Vehicle {
     pub stops: Vec<VehicleStop>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct VehicleStop {
     /// Stop IFOPT identifier
     pub stop_ifopt: String,

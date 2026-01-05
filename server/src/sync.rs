@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, warn};
 use utoipa::ToSchema;
 
@@ -49,6 +49,18 @@ impl Departure {
 
 /// In-memory store for departure data
 pub type DepartureStore = Arc<RwLock<HashMap<String, Vec<Departure>>>>;
+
+/// Update notification for vehicle data changes
+#[derive(Debug, Clone, Serialize)]
+pub struct VehicleUpdate {
+    /// Timestamp when this update was generated
+    pub timestamp: String,
+    /// Whether this is the initial snapshot or an incremental update
+    pub is_initial: bool,
+}
+
+/// Sender for vehicle update notifications
+pub type VehicleUpdateSender = broadcast::Sender<VehicleUpdate>;
 
 /// Types of OSM data quality issues
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -220,12 +232,16 @@ pub struct SyncManager {
     config: Arc<RwLock<Config>>,
     departures: DepartureStore,
     issues: OsmIssueStore,
+    vehicle_updates_tx: VehicleUpdateSender,
 }
 
 impl SyncManager {
     pub fn new(pool: SqlitePool, config: Config) -> Result<Self, SyncError> {
         let osm_client = OsmClient::new().map_err(|e| SyncError::OsmError(e.to_string()))?;
         let efa_client = EfaClient::new().map_err(|e| SyncError::EfaError(e.to_string()))?;
+
+        // Create broadcast channel for vehicle updates (capacity 16 - clients will get latest state anyway)
+        let (vehicle_updates_tx, _) = broadcast::channel(16);
 
         Ok(Self {
             pool,
@@ -234,6 +250,7 @@ impl SyncManager {
             config: Arc::new(RwLock::new(config)),
             departures: Arc::new(RwLock::new(HashMap::new())),
             issues: Arc::new(RwLock::new(Vec::new())),
+            vehicle_updates_tx,
         })
     }
 
@@ -245,6 +262,11 @@ impl SyncManager {
     /// Get a reference to the OSM issue store for API access
     pub fn issue_store(&self) -> OsmIssueStore {
         self.issues.clone()
+    }
+
+    /// Get the vehicle updates sender for passing to API handlers
+    pub fn vehicle_updates_sender(&self) -> VehicleUpdateSender {
+        self.vehicle_updates_tx.clone()
     }
 
     /// Start the background sync loops
@@ -1564,6 +1586,14 @@ impl SyncManager {
 
         // Release lock before logging
         drop(store);
+
+        // Broadcast vehicle update notification to all WebSocket clients
+        let update = VehicleUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            is_initial: false,
+        };
+        // Ignore send errors - they just mean no one is listening
+        let _ = self.vehicle_updates_tx.send(update);
 
         info!(
             success = success_count,
