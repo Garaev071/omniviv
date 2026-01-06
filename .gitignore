@@ -1,4 +1,6 @@
 *.mbtiles
+*.pbf
+*.tar.gz
 
 # Environment files (may contain secrets)
 .env
