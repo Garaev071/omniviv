@@ -4,7 +4,7 @@
     "sources": {
         "openmaptiles": {
             "type": "vector",
-            "url": "http://localhost:8080/bavaria"
+            "url": "http://localhost:8080/germany"
         }
     },
     "glyphs": "http://localhost:8080/font/{fontstack}/{range}",
