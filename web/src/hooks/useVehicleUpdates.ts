@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Vehicle } from "../api";
+import { getConfig } from "../config";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-const WS_URL = API_URL.replace(/^http/, "ws");
+function getWsUrl(): string {
+    return getConfig().apiUrl.replace(/^http/, "ws");
+}
 
 // Frontend interface (camelCase)
 export interface RouteVehicles {
@@ -171,7 +173,7 @@ export function useVehicleUpdates({
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
         try {
-            const ws = new WebSocket(`${WS_URL}/api/ws/vehicles`);
+            const ws = new WebSocket(`${getWsUrl()}/api/ws/vehicles`);
             wsRef.current = ws;
 
             ws.onopen = () => {

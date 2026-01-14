@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Bug, Clock, Layers, Navigation, Settings, Wifi, WifiOff } from "lucide-react";
+import { Activity, Bug, Clock, Github, Layers, Navigation, Settings, Wifi, WifiOff } from "lucide-react";
 import { TbWorldX } from "react-icons/tb";
 import { Api, Area, Route, RouteGeometry, Station, Vehicle } from "./api";
 import { BackendDiagnosticsPanel } from "./components/BackendDiagnosticsPanel";
@@ -11,14 +11,20 @@ import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import Map from "./components/map/Map";
 import type { DebugOptions } from "./components/vehicles/VehicleRenderer";
+import { getConfig } from "./config";
 import { useRendezvous } from "./hooks/useRendezvous";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
 
 type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | "efa" | null;
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-const api = new Api({ baseUrl: API_URL });
+let api: Api<unknown> | null = null;
+function getApi() {
+    if (!api) {
+        api = new Api({ baseUrl: getConfig().apiUrl });
+    }
+    return api;
+}
 
 // Fallback polling interval when WebSocket is not available (in milliseconds)
 const FALLBACK_REFRESH_INTERVAL = 5000;
@@ -191,7 +197,7 @@ export default function App() {
     useEffect(() => {
         const fetchIssuesCount = async () => {
             try {
-                const response = await fetch(`${API_URL}/api/issues`);
+                const response = await fetch(`${getConfig().apiUrl}/api/issues`);
                 if (response.ok) {
                     const data = await response.json();
                     setOsmIssuesCount(data.count);
@@ -210,7 +216,7 @@ export default function App() {
         try {
             const vehiclePromises = routes.map(async (route) => {
                 try {
-                    const response = await api.api.getVehiclesByRoute({ route_id: route.osm_id });
+                    const response = await getApi().api.getVehiclesByRoute({ route_id: route.osm_id });
                     return {
                         routeId: route.osm_id,
                         lineNumber: response.data.line_number ?? null,
@@ -247,9 +253,9 @@ export default function App() {
         const fetchData = async () => {
             try {
                 const [areasResponse, stationsResponse, routesResponse] = await Promise.all([
-                    api.api.listAreas(),
-                    api.api.listStations(),
-                    api.api.listRoutes(),
+                    getApi().api.listAreas(),
+                    getApi().api.listStations(),
+                    getApi().api.listRoutes(),
                 ]);
                 setAreas(areasResponse.data.areas);
                 setStations(stationsResponse.data.stations);
@@ -258,7 +264,7 @@ export default function App() {
                 const routesWithGeometry = await Promise.all(
                     routesResponse.data.routes.map(async (route) => {
                         try {
-                            const geomResponse = await api.api.getRouteGeometry(route.osm_id);
+                            const geomResponse = await getApi().api.getRouteGeometry(route.osm_id);
                             return { ...route, geometry: geomResponse.data };
                         } catch {
                             return { ...route, geometry: null };
@@ -376,6 +382,21 @@ export default function App() {
                     >
                         <Bug className="h-5 w-5" />
                     </Button>
+                    <a
+                        href="https://github.com/firstdorsal/omniviv"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="m-2"
+                    >
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            title="View on GitHub"
+                            aria-label="View on GitHub"
+                        >
+                            <Github className="h-5 w-5" />
+                        </Button>
+                    </a>
                 </div>
 
                 {/* Content panel */}

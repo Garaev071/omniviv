@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { Badge } from "./ui/badge";
 import { Activity, AlertTriangle, Clock, Zap } from "lucide-react";
+import { getConfig } from "../config";
 
 interface EfaStats {
     requests_per_minute: number;
@@ -11,8 +12,6 @@ interface EfaStats {
 interface DiagnosticsStats {
     efa: EfaStats;
 }
-
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
 function StatCard({
     icon: Icon,
@@ -57,7 +56,7 @@ function EfaStatsSection() {
 
     useEffect(() => {
         const connect = () => {
-            const wsUrl = API_URL.replace(/^http/, "ws") + "/api/ws/backend-diagnostics";
+            const wsUrl = getConfig().apiUrl.replace(/^http/, "ws") + "/api/ws/backend-diagnostics";
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {

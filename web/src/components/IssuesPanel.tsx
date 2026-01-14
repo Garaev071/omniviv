@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { getConfig } from "../config";
 
 // Types matching the backend API
 type TransportType = "tram" | "bus" | "train" | "unknown";
@@ -26,8 +27,6 @@ interface IssueListResponse {
     issues: OsmIssue[];
     count: number;
 }
-
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
 
 const ISSUE_TYPE_LABELS: Record<OsmIssue["issue_type"], string> = {
     missing_ifopt: "Missing IFOPT",
@@ -144,7 +143,7 @@ export function OsmIssuesPanel() {
     useEffect(() => {
         const fetchIssues = async () => {
             try {
-                const response = await fetch(`${API_URL}/api/issues`);
+                const response = await fetch(`${getConfig().apiUrl}/api/issues`);
                 if (response.ok) {
                     const data: IssueListResponse = await response.json();
                     setIssues(data.issues);
