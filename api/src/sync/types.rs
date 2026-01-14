@@ -1,0 +1,84 @@
+//! Type definitions for the sync module.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
+use utoipa::ToSchema;
+
+/// Type of stop event
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EventType {
+    Departure,
+    Arrival,
+}
+
+/// A stop event (departure or arrival)
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct Departure {
+    pub stop_ifopt: String,
+    pub event_type: EventType,
+    pub line_number: String,
+    /// For departures: destination; for arrivals: origin
+    pub destination: String,
+    /// Destination stop ID (for departures) or origin stop ID (for arrivals)
+    pub destination_id: Option<String>,
+    pub planned_time: String,
+    pub estimated_time: Option<String>,
+    pub delay_minutes: Option<i32>,
+    pub platform: Option<String>,
+    /// Unique trip identifier (AVMSTripID) - consistent across all stops for a journey
+    pub trip_id: Option<String>,
+}
+
+impl Departure {
+    pub fn planned_departure(&self) -> &str {
+        &self.planned_time
+    }
+
+    pub fn estimated_departure(&self) -> Option<&str> {
+        self.estimated_time.as_deref()
+    }
+}
+
+/// In-memory store for departure data
+pub type DepartureStore = Arc<RwLock<HashMap<String, Vec<Departure>>>>;
+
+/// Update notification for vehicle data changes
+#[derive(Debug, Clone, Serialize)]
+pub struct VehicleUpdate {
+    /// Timestamp when this update was generated
+    pub timestamp: String,
+    /// Whether this is the initial snapshot or an incremental update
+    pub is_initial: bool,
+}
+
+/// Sender for vehicle update notifications
+pub type VehicleUpdateSender = broadcast::Sender<VehicleUpdate>;
+
+/// EFA API request log for diagnostics
+#[derive(Debug, Clone, Serialize)]
+pub struct EfaRequestLog {
+    /// Unique request ID
+    pub id: String,
+    /// Timestamp when request was made
+    pub timestamp: String,
+    /// HTTP method (GET, POST)
+    pub method: String,
+    /// API endpoint called
+    pub endpoint: String,
+    /// Request parameters
+    pub params: Option<HashMap<String, String>>,
+    /// Duration of request in milliseconds
+    pub duration_ms: u64,
+    /// HTTP status code
+    pub status: u16,
+    /// Response size in bytes
+    pub response_size: Option<usize>,
+    /// Error message if request failed
+    pub error: Option<String>,
+}
+
+/// Sender for EFA request diagnostics
+pub type EfaRequestSender = broadcast::Sender<EfaRequestLog>;
