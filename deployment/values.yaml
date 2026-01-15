@@ -19,14 +19,14 @@ services:
             enabled: true
             context: ../../api
             dockerfile: Dockerfile
-        image: ghcr.io/firstdorsal/omniviv-api:main
+        image: ghcr.io/firstdorsal/omniviv-api:latest
     web:
         subdomain: omniviv
         build:
             enabled: true
             context: ../../web
             dockerfile: Dockerfile
-        image: ghcr.io/firstdorsal/omniviv-web:main
+        image: ghcr.io/firstdorsal/omniviv-frontend:latest
     martin:
         subdomain: omniviv-martin
         image: ghcr.io/maplibre/martin
