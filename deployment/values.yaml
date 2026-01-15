@@ -13,7 +13,7 @@ services:
         database:
             type: sqlite
             storage:
-                volumeName: api-database
+                volumeName: omniviv-api-database
                 absolutePath: null
         build:
             enabled: true
